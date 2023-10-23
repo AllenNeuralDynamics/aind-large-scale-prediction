@@ -178,20 +178,6 @@ class BlockedZarrArrayIterator:
         return _slice_along_dim(dim=dimension)
 
     @staticmethod
-    def gen_batch_slices(
-        arr_shape: Tuple[int, ...],
-        block_shape: Tuple[int, ...],
-        batch_size: int,
-        dimension: Optional[int] = 0,
-    ) -> List:
-        batch_slices = []
-
-        for gen_slice in BlockedZarrArrayIterator().gen_slices(
-            arr_shape=arr_shape, block_shape=block_shape, dimension=dimension
-        ):
-            batch_slices.append(gen_slice)
-
-    @staticmethod
     def get_block_shape(arr: ArrayLike, target_size_mb=409600, mode="cycle"):
         """
         Given the shape and chunk size of a pre-chunked array, determine the optimal block shape
