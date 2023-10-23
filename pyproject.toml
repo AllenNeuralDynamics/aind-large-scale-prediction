@@ -17,6 +17,14 @@ readme = "README.md"
 dynamic = ["version"]
 
 dependencies = [
+    'ome-zarr==0.8.2',
+    'numpy',
+    'zarr',
+    'scikit-learn',
+    'pims==0.6.1',
+    'imagecodecs[all]==2023.3.16',
+    'tifffile',
+    'dask[distributed]'
 ]
 
 [project.optional-dependencies]
