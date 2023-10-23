@@ -18,14 +18,14 @@ dynamic = ["version"]
 
 dependencies = [
     'ome-zarr==0.8.2',
-    'numpy',
-    'zarr',
-    'scikit-learn',
+    'numpy==1.24.4',
+    'zarr==2.16.1',
+    'scikit-learn==1.3.2',
     'pims==0.6.1',
     'imagecodecs[all]==2023.3.16',
-    'tifffile',
-    'dask[distributed]',
-    'dask_image'
+    'tifffile==2023.7.10',
+    'dask[distributed]==2023.5.0',
+    'dask_image==2023.3.0'
 ]
 
 [project.optional-dependencies]
