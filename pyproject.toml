@@ -24,7 +24,8 @@ dependencies = [
     'pims==0.6.1',
     'imagecodecs[all]==2023.3.16',
     'tifffile',
-    'dask[distributed]'
+    'dask[distributed]',
+    'dask_image'
 ]
 
 [project.optional-dependencies]

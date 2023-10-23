@@ -3,7 +3,7 @@ Zarr slice generator that traverses an
 entire lazy array
 """
 
-from typing import Generator, Tuple
+from typing import Generator, List, Optional, Tuple
 
 import dask.array as da
 import numpy as np
@@ -125,7 +125,9 @@ class BlockedZarrArrayIterator:
 
     @staticmethod
     def gen_slices(
-        arr_shape: Tuple[int, ...], block_shape: Tuple[int, ...]
+        arr_shape: Tuple[int, ...],
+        block_shape: Tuple[int, ...],
+        dimension: Optional[int] = 0,
     ) -> Generator:
         """
         Generate a series of slices that can be used to traverse an array in
@@ -173,7 +175,21 @@ class BlockedZarrArrayIterator:
                         yield (slice(i, end_i),) + rest
 
         # Start slicing along the first dimension
-        return _slice_along_dim(0)
+        return _slice_along_dim(dim=dimension)
+
+    @staticmethod
+    def gen_batch_slices(
+        arr_shape: Tuple[int, ...],
+        block_shape: Tuple[int, ...],
+        batch_size: int,
+        dimension: Optional[int] = 0,
+    ) -> List:
+        batch_slices = []
+
+        for gen_slice in BlockedZarrArrayIterator().gen_slices(
+            arr_shape=arr_shape, block_shape=block_shape, dimension=dimension
+        ):
+            batch_slices.append(gen_slice)
 
     @staticmethod
     def get_block_shape(arr: ArrayLike, target_size_mb=409600, mode="cycle"):

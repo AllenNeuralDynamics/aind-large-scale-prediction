@@ -14,11 +14,12 @@ import numpy as np
 import pims
 import tifffile
 import zarr
-from aind_registration_evaluation._shared.types import ArrayLike, PathLike
 from dask.array.core import Array
 from dask.base import tokenize
 from dask_image.imread import imread as daimread
 from skimage.io import imread as sk_imread
+
+from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 
 from .utils import add_leading_dim
 
@@ -40,7 +41,7 @@ class ImageReader(ABC):
 
         """
 
-        self.__data_path = Path(data_path)
+        self.__data_path = data_path
         super().__init__()
 
     @abstractmethod
@@ -140,7 +141,7 @@ class ImageReader(ABC):
             New path of the image
 
         """
-        self.__data_path = Path(new_data_path)
+        self.__data_path = new_data_path
 
 
 class OMEZarrReader(ImageReader):
@@ -149,7 +150,9 @@ class OMEZarrReader(ImageReader):
     """
 
     def __init__(
-        self, data_path: PathLike, multiscale: Optional[int] = 0
+        self,
+        data_path: PathLike,
+        multiscale: Optional[str] = "0",
     ) -> None:
         """
         Class constructor of image OMEZarr reader.
@@ -159,12 +162,20 @@ class OMEZarrReader(ImageReader):
         data_path: PathLike
             Path where the image is located
 
-        multiscale: Optional[int]
-            Desired multiscale to read from the image. Default: 0 which is
-            supposed to be the highest resolution
+        multiscale: Optional[str]
+            Desired multiscale to read from the image. Default: "0"
+            which is supposed to be the highest resolution
 
         """
-        super().__init__(Path(data_path).joinpath(str(multiscale)))
+
+        # Adding multiscale to path
+        if isinstance(data_path, str):
+            data_path = f"{data_path}/{multiscale}"
+
+        else:
+            data_path = data_path.joinpath(str(multiscale))
+
+        super().__init__(data_path=data_path)
         self.lazy_image = da.from_zarr(self.data_path)
 
     def indexing(self, xv: np.array, yv: np.array) -> ArrayLike:
@@ -205,9 +216,9 @@ class OMEZarrReader(ImageReader):
         """
 
         if chunk_size:
-            image = self.lazy_image.rechunk(chunks=chunk_size)
+            return self.lazy_image.rechunk(chunks=chunk_size)
 
-        return image
+        return self.lazy_image
 
     def as_numpy_array(self):
         """
@@ -269,7 +280,7 @@ class TiffReader(ImageReader):
             Path where the image is located
 
         """
-        super().__init__(Path(data_path))
+        super().__init__(data_path)
         self.tiff = tifffile.TiffFile(self.data_path)
 
     def indexing(self, xv: np.array, yv: np.array) -> ArrayLike:
@@ -395,7 +406,7 @@ class PngReader(ImageReader):
             Path where the image is located
 
         """
-        super().__init__(Path(data_path))
+        super().__init__(data_path)
 
     def indexing(self, xv: np.array, yv: np.array) -> ArrayLike:
         """
@@ -516,21 +527,31 @@ class ImageReaderFactory:
         """
         return self.__extensions
 
-    def create(self, data_path: PathLike) -> ImageReader:
+    def create(
+        self, data_path: PathLike, parse_path: Optional[bool] = True, **kwargs
+    ) -> ImageReader:
         """
         Method to create the image reader based on the format.
 
+        Parameters
+        ----------
+        data_path: PathLike
+            Path where the data is located
+
+        parse_path: Optional[bool]
+            If True, parses the path with the pathlib.Path object.
+            Not useful when we're trying to access data in S3.
+
         Returns
-        ------------------------
+        -------
         List
             List with the allowed image format extensions
 
         """
-
-        data_path = Path(data_path)
-        ext = data_path.suffix
+        path_cast = Path(data_path) if parse_path else data_path
+        ext = Path(data_path).suffix
 
         if ext not in self.__extensions:
             raise NotImplementedError(f"File type {ext} not supported")
 
-        return self.factory[ext](data_path)
+        return self.factory[ext](path_cast, **kwargs)
