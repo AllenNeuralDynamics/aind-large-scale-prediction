@@ -128,6 +128,7 @@ class BlockedZarrArrayIterator:
         arr_shape: Tuple[int, ...],
         block_shape: Tuple[int, ...],
         dimension: Optional[int] = 0,
+        start_shape: Optional[List[int]] = None,
     ) -> Generator:
         """
         Generate a series of slices that can be used to traverse an array in
@@ -155,10 +156,19 @@ class BlockedZarrArrayIterator:
             A generator yielding tuples of slices. Each tuple can
             be used to index the input array.
         """
-        if len(arr_shape) != len(block_shape):
+        if start_shape is None:
+            start_shape = [0] * len(arr_shape)
+
+        if len(arr_shape) != len(block_shape) or len(arr_shape) != len(
+            start_shape
+        ):
             raise Exception(
                 "array shape and block shape have different lengths"
             )
+
+        for idx in range(len(arr_shape)):
+            if start_shape[idx] >= arr_shape[idx] or start_shape[idx] < 0:
+                raise ValueError("Please, verify your start shape")
 
         def _slice_along_dim(dim: int) -> Generator:
             """A helper generator function that slices along one dimension."""
@@ -167,7 +177,9 @@ class BlockedZarrArrayIterator:
                 yield ()
             else:
                 # Iterate over the current dimension in steps of the block size
-                for i in range(0, arr_shape[dim], block_shape[dim]):
+                for i in range(
+                    start_shape[dim], arr_shape[dim], block_shape[dim]
+                ):
                     # Calculate the end index for this block
                     end_i = min(i + block_shape[dim], arr_shape[dim])
                     # Generate slices for the remaining dimensions
