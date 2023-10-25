@@ -6,9 +6,6 @@ from __future__ import print_function
 
 import ctypes
 import multiprocessing
-from collections import deque
-from itertools import chain
-from sys import getsizeof, stderr
 from typing import Optional, Tuple
 
 import numpy as np
@@ -21,74 +18,7 @@ from aind_large_scale_prediction.generator.zarr_slice_generator import (
 )
 from aind_large_scale_prediction.io.utils import extract_data
 
-try:
-    from reprlib import repr
-except ImportError:
-    pass
-
-
-def total_size(o, handlers={}, verbose=False):
-    """Returns the approximate memory footprint an object and all of its contents.
-
-    Automatically finds the contents of the following builtin containers and
-    their subclasses:  tuple, list, deque, dict, set and frozenset.
-    To search other containers, add handlers to iterate over their contents:
-
-        handlers = {SomeContainerClass: iter,
-                    OtherContainerClass: OtherContainerClass.get_elements}
-
-    """
-    dict_handler = lambda d: chain.from_iterable(d.items())
-    all_handlers = {
-        tuple: iter,
-        list: iter,
-        deque: iter,
-        dict: dict_handler,
-        set: iter,
-        frozenset: iter,
-    }
-    all_handlers.update(handlers)  # user handlers take precedence
-    seen = set()  # track which object id's have already been seen
-    default_size = getsizeof(0)  # estimate sizeof object without __sizeof__
-
-    def sizeof(o):
-        if id(o) in seen:  # do not double count the same object
-            return 0
-        seen.add(id(o))
-        s = getsizeof(o, default_size)
-
-        if verbose:
-            print(s, type(o), repr(o), file=stderr)
-
-        for typ, handler in all_handlers.items():
-            if isinstance(o, typ):
-                s += sum(map(sizeof, handler(o)))
-                break
-        return s
-
-    return sizeof(o)
-
-
-def divide_len_workers(size_len, worker_id, total_workers):
-    if not worker_id:
-        raise ValueError("Verify the numbers of workers")
-
-    elif worker_id == 1 and worker_id == total_workers:
-        return size_len
-
-    if size_len < worker_id:
-        raise ValueError("Check your parameters, oversplitting work")
-
-    instances_per_worker = size_len // total_workers
-
-    lower = (worker_id - 1) * (instances_per_worker)
-    upper = (
-        size_len
-        if worker_id == total_workers
-        else lower + instances_per_worker
-    )
-
-    return lower, upper
+from .utils import divide_len_workers, getsizeof
 
 
 class ZarrSuperChunks2(Dataset):
