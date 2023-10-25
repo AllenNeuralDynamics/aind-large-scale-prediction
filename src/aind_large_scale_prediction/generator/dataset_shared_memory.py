@@ -209,10 +209,26 @@ class ZarrSuperChunks(Dataset):
 
         return index - curr_sum
 
-    def __check_super_chunk_position(index) -> int:
-        # TODO increment current super chunk position
-        # based on the current index
-        pass
+    def __check_super_chunk_position(self, index) -> int:
+        """
+        Increments the super chunk position as corresponds.
+
+        Parameters
+        ----------
+        index: int
+            Current dataset index shared among workers
+
+        Returns
+        -------
+        int:
+            Integer with the new super chunk position
+        """
+        curr_index = self.__map_index(index)
+
+        if index > 0 and curr_index == 0:
+            True
+
+        return False
 
     def __getitem__(self, index):
         if not self.use_cache:
@@ -226,9 +242,11 @@ class ZarrSuperChunks(Dataset):
                 f"Pulled super chunk of size {lazy_super_chunk.shape} into shared array {self.super_chunk_in_memory.shape}"
             )
 
-        # Increments the shuper chunk
-        self.curr_super_chunk_pos = self.__check_super_chunk_position(index)
+        # Increments the shuper chunk position
+        if self.__check_super_chunk_position(index):
+            self.curr_super_chunk_pos += 1
 
+        # Maps the shared worker index to access the corresponding slice in the super chunk
         curr_internal_super_chunk_slice = self.__map_index(index)
 
         return self.super_chunk_in_memory[
@@ -237,10 +255,10 @@ class ZarrSuperChunks(Dataset):
             ]
         ]
 
-    # np.zeros((1), dtype=np.uint8)
+    # return np.zeros((1), dtype=np.uint8)
 
     def __len__(self):
-        return sum(internal_slice_sum)
+        return sum(self.internal_slice_sum)
 
 
 def main():
