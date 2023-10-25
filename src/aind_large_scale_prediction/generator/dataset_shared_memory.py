@@ -87,6 +87,10 @@ class ZarrSuperChunks(Dataset):
             shape=self.super_chunk_size
         )
 
+        self.internal_slice_sum = tuple(
+            len(internal_slice) for internal_slice in self.internal_slices
+        )
+
     def __init_shared_array(self, shape: Tuple[int]):
         """
         Initializes a shared memory array where
@@ -104,9 +108,8 @@ class ZarrSuperChunks(Dataset):
             Tensor pointing to a shared memory
             space
         """
-        print(f"Super chunk shape: {shape}")
-        shape = int(np.prod(shape))
-        print(f"Multiplication: {shape}")
+        shape = int(np.prod(shape, axis=0))
+        print(shape)
         shared_array_base = multiprocessing.Array(
             typecode_or_type=ctypes.c_ushort,  # ctypes.c_short, #ctypes.c_float
             size_or_initializer=shape,
@@ -177,14 +180,66 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator,
         )
 
+    def __map_index(self, index) -> int:
+        """
+        Maps the current worker index to the corresponding
+        internal slice for the corresponding super chunk.
+        The internal slice is Tuple[ Tuple[ List[slice] ] ]
+        which contains the corresponding prediction chunk
+        position for a super chunk.
+
+        Parameters
+        ----------
+        index: int
+            Current index limited by the Dataset.__len__
+            method
+
+        Returns
+        -------
+        int
+            Integer with the current position to access
+            the current slice of a super chunk
+        """
+        curr_sum = sum(
+            internal_slice_count
+            for internal_slice_count in self.internal_slice_sum[
+                : self.curr_super_chunk_pos
+            ]
+        )
+
+        return index - curr_sum
+
+    def __check_super_chunk_position(index) -> int:
+        # TODO increment current super chunk position
+        # based on the current index
+        pass
+
     def __getitem__(self, index):
-        # print(index)
-        return np.zeros((1), dtype=np.uint8)
+        if not self.use_cache:
+            # Load data into shared memory space
+            print(f"Filling super chunk in index: {index}")
+            lazy_super_chunk = self.lazy_data[
+                self.self.super_chunk_slices[self.curr_super_chunk_pos]
+            ]
+            self.super_chunk_in_memory = lazy_super_chunk.compute()
+            print(
+                f"Pulled super chunk of size {lazy_super_chunk.shape} into shared array {self.super_chunk_in_memory.shape}"
+            )
+
+        # Increments the shuper chunk
+        self.curr_super_chunk_pos = self.__check_super_chunk_position(index)
+
+        curr_internal_super_chunk_slice = self.__map_index(index)
+
+        return self.super_chunk_in_memory[
+            self.internal_slices[self.curr_super_chunk_pos][
+                curr_internal_super_chunk_slice
+            ]
+        ]
+
+    # np.zeros((1), dtype=np.uint8)
 
     def __len__(self):
-        internal_slice_sum = tuple(
-            len(internal_slice) for internal_slice in self.internal_slices
-        )
         return sum(internal_slice_sum)
 
 
