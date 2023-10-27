@@ -5,6 +5,7 @@ to load the models
 
 import ctypes
 import multiprocessing
+import os
 from typing import Optional, Tuple
 
 import numpy as np
@@ -80,7 +81,9 @@ class ZarrSuperChunks(Dataset):
 
         # Control variables
         self.super_chunk_slices_idx = 0
-        self.use_cache = False
+        self.use_cache = multiprocessing.Value("b", False)
+
+        print("Cache: ", self.use_cache.value)
 
         # Initializing shared array
         self.super_chunk_in_memory = self.__init_shared_array(
@@ -111,13 +114,13 @@ class ZarrSuperChunks(Dataset):
         shape = int(np.prod(shape, axis=0))
         print(shape)
         shared_array_base = multiprocessing.Array(
-            typecode_or_type=ctypes.c_ushort,  # ctypes.c_short, #ctypes.c_float
+            typecode_or_type=ctypes.c_short,  # ctypes.c_ushort, #ctypes.c_float
             size_or_initializer=shape,
             lock=True,
         )
         shared_array = np.ctypeslib.as_array(shared_array_base.get_obj())
         shared_array = shared_array.reshape(shape)
-        # shared_array = torch.from_numpy(shared_array)
+        shared_array = torch.from_numpy(shared_array)
 
         print(
             "Size of shared array in bytes: ",
@@ -180,7 +183,7 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator,
         )
 
-    def __map_index(self, index) -> int:
+    def __map_index(self, index, next_batch=False) -> int:
         """
         Maps the current worker index to the corresponding
         internal slice for the corresponding super chunk.
@@ -200,10 +203,11 @@ class ZarrSuperChunks(Dataset):
             Integer with the current position to access
             the current slice of a super chunk
         """
+        add_pos = 1 if next_batch else 0
         curr_sum = sum(
             internal_slice_count
             for internal_slice_count in self.internal_slice_sum[
-                : self.curr_super_chunk_pos
+                : self.curr_super_chunk_pos + add_pos
             ]
         )
 
@@ -223,37 +227,78 @@ class ZarrSuperChunks(Dataset):
         int:
             Integer with the new super chunk position
         """
-        curr_index = self.__map_index(index)
+        curr_index = self.__map_index(index, next_batch=True)
 
         if index > 0 and curr_index == 0:
-            True
+            return True
 
         return False
 
-    def __getitem__(self, index):
-        if not self.use_cache:
-            # Load data into shared memory space
-            print(f"Filling super chunk in index: {index}")
-            lazy_super_chunk = self.lazy_data[
-                self.self.super_chunk_slices[self.curr_super_chunk_pos]
-            ]
-            self.super_chunk_in_memory = lazy_super_chunk.compute()
-            print(
-                f"Pulled super chunk of size {lazy_super_chunk.shape} into shared array {self.super_chunk_in_memory.shape}"
-            )
+    def __getitem__(self, index: int) -> np.array:
+        """
+        Get item procedure for the Lazy zarr dataset.
+        It retrieves data based on the index variable
+        that is shared among all workers
+
+        Parameters
+        ----------
+        index: int
+            location index that goes from 0 to
+            ZarrSuperChunks().__len__(). This index
+            is internally mapped to correspond in
+            the generated slices per super chunk
+        """
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
 
         # Increments the shuper chunk position
-        if self.__check_super_chunk_position(index):
+        if self.__check_super_chunk_position(index) == True:
+            print(
+                f"Incrementing super chunk {self.curr_super_chunk_pos} in index: {index}"
+            )
             self.curr_super_chunk_pos += 1
+
+            # Setting cache False to pull a new super chunk
+            with self.use_cache.get_lock():
+                self.use_cache.value = False
+                print(
+                    f"[Worker {worker_id} {os.getpid()}] changed the cache value"
+                )
 
         # Maps the shared worker index to access the corresponding slice in the super chunk
         curr_internal_super_chunk_slice = self.__map_index(index)
 
-        return self.super_chunk_in_memory[
+        if not self.use_cache.value:
+            # Setting cache True to pull data from same super chunk
+            with self.use_cache.get_lock():
+                self.use_cache.value = True
+                print(
+                    f"[Worker {worker_id} {os.getpid()}] changed the cache value"
+                )
+
+            # Load data into shared memory space
+            print(
+                f"[Worker {worker_id} {os.getpid()}] Filling super chunk in index: {index} - super chunk pos {self.curr_super_chunk_pos}"
+            )
+            lazy_super_chunk = self.lazy_data[
+                self.super_chunk_slices[self.curr_super_chunk_pos]
+            ]
+            # Setting super chunk in memory
+            self.super_chunk_in_memory = lazy_super_chunk.compute()
+            print(
+                f"[Worker {worker_id} {os.getpid()}] Pulled super chunk of size {lazy_super_chunk.shape} into shared array {self.super_chunk_in_memory.shape}"
+            )
+
+        return_array = self.super_chunk_in_memory[
             self.internal_slices[self.curr_super_chunk_pos][
                 curr_internal_super_chunk_slice
             ]
         ]
+
+        print(
+            f"[Worker {worker_id} {os.getpid()}] Returning array with shape: {return_array.shape} - index {index} - super chunk {self.curr_super_chunk_pos} - curr internal {curr_internal_super_chunk_slice}"
+        )
+        return return_array
 
     # return np.zeros((1), dtype=np.uint8)
 
@@ -262,36 +307,41 @@ class ZarrSuperChunks(Dataset):
 
 
 def main():
+    import dask.array as da
     from torch.utils.data import DataLoader
 
     from aind_large_scale_prediction.io import ImageReaderFactory
 
-    BUCKET_NAME = "aind-open-data"
-    IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
-    TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
+    # BUCKET_NAME = "aind-open-data"
+    # IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
+    # TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
+    # dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
+    # multiscale = "2"
+    # dataset_reader = ImageReaderFactory().create(
+    #     data_path=dataset_path,
+    #     parse_path=False,
+    #     multiscale=multiscale,
+    # )
+    # lazy_data = dataset_reader.as_dask_array()
 
-    dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
-    multiscale = "2"
-
-    dataset_reader = ImageReaderFactory().create(
-        data_path=dataset_path,
-        parse_path=False,
-        multiscale=multiscale,
+    data_path = ""  # dataset_reader.data_path
+    lazy_data = da.zeros(
+        (1, 1, 4096, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int16
     )
 
     print(
-        f"Read dataset: {dataset_reader.data_path} - dtype: {dataset_reader.as_dask_array().dtype} - Shape: {dataset_reader.shape} - Chunks: {dataset_reader.chunks}"
+        f"Read dataset: {data_path} - dtype: {lazy_data.dtype} - Shape: {lazy_data.shape} - Chunksize: {lazy_data.chunksize}"
     )
 
     zarr_dataset = ZarrSuperChunks(
-        lazy_data=dataset_reader.as_dask_array(),
+        lazy_data=lazy_data,
         prediction_chunk_size=(64, 128, 128),
         super_chunk_size=None,
         target_size_mb=512,
     )
 
     dataloader = DataLoader(
-        zarr_dataset, batch_size=64, shuffle=False, num_workers=10
+        zarr_dataset, batch_size=128, shuffle=False, num_workers=2
     )
 
     for i, sample in enumerate(dataloader):
@@ -300,3 +350,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    # TODO
+    # ###############################
+    # ####  Fixes Shared Memory  ####
+    # ###############################
+
+    # 1. Lock Array so only one worker can access it
+    # 2. Share the use_cache variable among workers
+
+    # All workers will have an internal super chunk pos
+    # and internal slice position. However, the super chunk
+    # should only change whenever we send all the chunks for.
+    # Therefore, the super chunk position must be shared and locked.
+    # The internal slice should not be shared since it depends
+    # on the super chunk position and current index
+
+    # I need to make all workers wait until all super chunks are sent,
+    # this means that I need to find a way to know when all chunks
+    # of a super chunk were shared. Shared variable that maps the
+    # status of internal chunks of a super chunk?
