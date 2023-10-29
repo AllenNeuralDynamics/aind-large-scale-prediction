@@ -3,16 +3,21 @@ Defines the PyTorch Datasets classes
 to load the models
 """
 
-import ctypes
 import multiprocessing
-from typing import Generator, Optional, Tuple
+import time
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
 
 from aind_large_scale_prediction._shared.types import ArrayLike
-from aind_large_scale_prediction.generator.utils import getsizeof
+from aind_large_scale_prediction.generator.dataloader import ZarrDataLoader
+from aind_large_scale_prediction.generator.utils import (
+    find_position_in_total_sum,
+    getsizeof,
+    map_dtype_to_ctype,
+)
 from aind_large_scale_prediction.generator.zarr_slice_generator import (
     BlockedZarrArrayIterator,
 )
@@ -34,7 +39,7 @@ class ZarrSuperChunks(Dataset):
         super_chunk_size: Optional[Tuple[int, int, int]] = None,
         target_size_mb: Optional[int] = None,
         locker=None,
-        barrier=None,
+        condition=None,
     ) -> None:
         """
         Initializes the dataset class
@@ -76,7 +81,7 @@ class ZarrSuperChunks(Dataset):
 
         # Multiprocessing variables
         self.locker = locker
-        self.barrier = barrier
+        self.condition = condition
         self.curr_super_chunk_pos = multiprocessing.Value("i", -1)
 
         # Initialization of super chunks
@@ -91,14 +96,21 @@ class ZarrSuperChunks(Dataset):
         (
             self.super_chunk_in_memory,
             self.array_pointer,
-        ) = self.__init_shared_array(shape=self.super_chunk_size)
+        ) = self.__init_shared_array(
+            shape=self.super_chunk_size, dtype=self.lazy_data.dtype
+        )
 
         # Number of slices per super chunk
         self.internal_slice_sum = tuple(
             len(internal_slice) for internal_slice in self.internal_slices
         )
+        self.pulled_chunks_per_super_chunk = multiprocessing.Array(
+            "i", len(self.internal_slice_sum)
+        )
 
-    def __init_shared_array(self, shape: Tuple[int]) -> torch.Tensor:
+    def __init_shared_array(
+        self, shape: Tuple[int], dtype: type
+    ) -> torch.Tensor:
         """
         Initializes a shared memory array where
         the super chunks will live one at a time.
@@ -109,6 +121,9 @@ class ZarrSuperChunks(Dataset):
             Shape of the shared memory array that
             all workers will access
 
+        dtype: type
+            Array dtype.
+
         Returns
         -------
         torch.Tensor
@@ -116,7 +131,7 @@ class ZarrSuperChunks(Dataset):
             space
         """
         shared_array_base = multiprocessing.Array(
-            typecode_or_type=ctypes.c_short,  # ctypes.c_ushort, #ctypes.c_float
+            typecode_or_type=map_dtype_to_ctype(dtype=dtype, exact=False),
             size_or_initializer=int(np.prod(shape, axis=0)),
             lock=True,
         )
@@ -268,12 +283,115 @@ class ZarrSuperChunks(Dataset):
         int:
             Integer with the new super chunk position
         """
-        curr_index = self.__map_index(index, next_batch=True)
+        pos_in_super_chunk = find_position_in_total_sum(
+            index, self.internal_slice_sum
+        )
+        return pos_in_super_chunk
 
-        if index > 0 and curr_index >= 0:
+    def __check_pulled_chunks(self) -> bool:
+        """
+        Checks the number of pulled chunks for a super chunk.
+
+        Returns
+        -------
+        bool
+            True, if all chunks were retrieved for that super
+            chunk, False otherwise.
+        """
+        if self.curr_super_chunk_pos.value == -1:
+            with self.pulled_chunks_per_super_chunk.get_lock():
+                for i in range(len(self.internal_slice_sum)):
+                    self.pulled_chunks_per_super_chunk[i] = 0
+
+            return True
+
+        number_pulled_chunks = self.pulled_chunks_per_super_chunk[
+            self.curr_super_chunk_pos.value
+        ]
+        total_chunks_super_chunk = self.internal_slice_sum[
+            self.curr_super_chunk_pos.value
+        ]
+
+        if number_pulled_chunks == total_chunks_super_chunk:
             return True
 
         return False
+
+    def __parallel_get_item(self, index: int) -> torch.Tensor:
+        """
+        Method to retrieve the current chunk in the
+        current super chunk.
+
+        Parameters
+        ----------
+        index: int
+            Current index in the worker controlled by
+            __len__
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor with the current chunk of the
+            super chunk
+        """
+
+        self.locker.acquire()
+        try:
+            if self.__check_pulled_chunks():
+                with self.curr_super_chunk_pos.get_lock():
+                    self.curr_super_chunk_pos.value += 1
+
+                # Setting super chunk in memory
+                self.super_chunk_in_memory = self.lazy_data[
+                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
+                ].compute()
+
+                with self.condition:
+                    self.condition.notify_all()
+
+        except BaseException as e:
+            raise BaseException(f"Error pulling data: {e}")
+
+        finally:
+            # Releasing lock
+            self.locker.release()
+
+        next_super_chunk_position = self.__check_super_chunk_position(index)
+
+        if self.curr_super_chunk_pos.value != next_super_chunk_position:
+            # If workers are ahead of current super chunk position, wait
+            with self.condition:
+                while (
+                    self.curr_super_chunk_pos.value
+                    != next_super_chunk_position
+                ):
+                    self.condition.wait()
+
+        # Getting internal slice position
+        curr_internal_super_chunk_position = self.__map_index(index)
+
+        if (
+            self.internal_slice_sum[self.curr_super_chunk_pos.value]
+            < curr_internal_super_chunk_position
+        ):
+            raise RuntimeError(
+                f"Worker got an out of bounds index: {curr_internal_super_chunk_position}"
+            )
+
+        # Pulling chunk
+        pulled_chunk = self.super_chunk_in_memory[
+            self.internal_slices[self.curr_super_chunk_pos.value][
+                curr_internal_super_chunk_position
+            ]
+        ]
+
+        # Updating number of chunks pulled per super chunk
+        with self.pulled_chunks_per_super_chunk.get_lock():
+            self.pulled_chunks_per_super_chunk[
+                self.curr_super_chunk_pos.value
+            ] += 1
+
+        return pulled_chunk
 
     def __getitem__(self, index: int) -> np.array:
         """
@@ -295,55 +413,44 @@ class ZarrSuperChunks(Dataset):
             Tensor with size (batch_size, slice_size)
             where slice_size depends on your data
         """
+        pulled_prediction_chunk = None
+
         worker_info = get_worker_info()
 
         if worker_info is None:
             # Main workers - No necessity of parallelism
             if (
                 self.__check_super_chunk_position(index)
+                != self.curr_super_chunk_pos.value
                 or self.curr_super_chunk_pos.value == -1
             ):
                 self.curr_super_chunk_pos.value += 1
 
-        else:
-            old_super_chunk_pos = self.curr_super_chunk_pos.value
-            worker_id = worker_info.id if worker_info else 0
-            check_index_batch = self.__check_super_chunk_position(index)
+                self.super_chunk_in_memory = self.lazy_data[
+                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
+                ].compute()
 
-            if check_index_batch or self.curr_super_chunk_pos.value == -1:
-                # Barrier and lock
-                self.barrier.wait()
-                self.locker.acquire()
+            curr_internal_super_chunk_position = self.__map_index(index)
 
-                try:
-                    if old_super_chunk_pos == self.curr_super_chunk_pos.value:
-                        with self.curr_super_chunk_pos.get_lock():
-                            self.curr_super_chunk_pos.value += 1
+            if (
+                self.internal_slice_sum[self.curr_super_chunk_pos.value]
+                < curr_internal_super_chunk_position
+            ):
+                raise RuntimeError(
+                    f"Worker got an out of bounds index: {curr_internal_super_chunk_position}"
+                )
 
-                        # Setting super chunk in memory
-
-                        self.super_chunk_in_memory = self.lazy_data[
-                            self.super_chunk_slices[
-                                self.curr_super_chunk_pos.value
-                            ]
-                        ].compute()
-
-                except BaseException as e:
-                    raise BaseException(f"Error pulling data: {e}")
-
-                finally:
-                    # Releasing lock
-                    self.locker.release()
-
-        curr_internal_super_chunk_slice = self.__map_index(index)
-
-        return_array = self.super_chunk_in_memory[
-            self.internal_slices[self.curr_super_chunk_pos.value][
-                curr_internal_super_chunk_slice
+            # Pulling chunk
+            pulled_prediction_chunk = self.super_chunk_in_memory[
+                self.internal_slices[self.curr_super_chunk_pos.value][
+                    curr_internal_super_chunk_position
+                ]
             ]
-        ]
 
-        return return_array, worker_id
+        else:
+            pulled_prediction_chunk = self.__parallel_get_item(index)
+
+        return pulled_prediction_chunk
 
     def __len__(self):
         """
@@ -362,56 +469,84 @@ class ZarrSuperChunks(Dataset):
 
 
 def main():
+    """
+    Main function
+    """
     import dask.array as da
-    from torch.utils.data import DataLoader
 
     from aind_large_scale_prediction.io import ImageReaderFactory
 
-    # BUCKET_NAME = "aind-open-data"
-    # IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
-    # TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
-    # dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
-    # multiscale = "2"
-    # dataset_reader = ImageReaderFactory().create(
-    #     data_path=dataset_path,
-    #     parse_path=False,
-    #     multiscale=multiscale,
-    # )
-    # lazy_data = dataset_reader.as_dask_array()
-
-    data_path = ""  # dataset_reader.data_path
-    lazy_data = da.zeros(
-        (1, 1, 4096, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int16
+    BUCKET_NAME = "aind-open-data"
+    IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
+    TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
+    dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
+    multiscale = "2"
+    dataset_reader = ImageReaderFactory().create(
+        data_path=dataset_path,
+        parse_path=False,
+        multiscale=multiscale,
     )
+    lazy_data = dataset_reader.as_dask_array().astype(np.int32)
+    data_path = dataset_reader.data_path
+
+    # data_path = dataset_reader.data_path
+    # lazy_data = da.zeros(
+    #     (1, 1, 5981, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int32
+    # )
 
     print(
         f"Read dataset: {data_path} - dtype: {lazy_data.dtype} - Shape: {lazy_data.shape} - Chunksize: {lazy_data.chunksize}"
     )
 
-    n_workers = 2
+    print(f"Array shape: {lazy_data.shape}")
+    results = {}
+    prediction_chunk_size = (64, 64, 64)
+    target_size_mb = 512
+    for n_workers in range(0, 10):
+        locker = multiprocessing.Lock() if n_workers else None
+        condition = multiprocessing.Condition()
 
-    locker = multiprocessing.Lock() if n_workers else None
-    barrier = multiprocessing.Barrier(n_workers) if n_workers else None
+        for batch_size in [8, 16]:
+            print(
+                f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
+            )
+            start_time = time.time()
+            zarr_dataset = ZarrSuperChunks(
+                lazy_data=lazy_data,
+                prediction_chunk_size=prediction_chunk_size,
+                super_chunk_size=None,
+                target_size_mb=target_size_mb,
+                locker=locker,
+                condition=condition,
+            )
 
-    zarr_dataset = ZarrSuperChunks(
-        lazy_data=lazy_data,
-        prediction_chunk_size=(64, 128, 128),
-        super_chunk_size=None,
-        target_size_mb=512,
-        locker=locker,
-        barrier=barrier,
-    )
+            zarr_data_loader = ZarrDataLoader(
+                zarr_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=n_workers,
+            )
 
-    dataloader = DataLoader(
-        zarr_dataset, batch_size=128, shuffle=False, num_workers=n_workers
-    )
+            print("Starting the loading...")
 
-    for i, sample in enumerate(dataloader):
-        print(i, "Worker id: ", sample[1], " Array: ", sample[0].shape)
+            for i, sample in enumerate(zarr_data_loader):
+                pass
 
+            end_time = time.time()
+            results[f"Workers {n_workers} - batch_size {batch_size}"] = (
+                end_time - start_time
+            )
+            print(
+                f"Time executing with {n_workers} workers and batch size {batch_size}: {end_time - start_time} seconds"
+            )
+
+    print(results)
     locker = None
     barrier = None
+    condition = None
 
 
 if __name__ == "__main__":
     main()
+    # import cProfile
+    # cProfile.run('main()', filename="compute_costs.dat")
