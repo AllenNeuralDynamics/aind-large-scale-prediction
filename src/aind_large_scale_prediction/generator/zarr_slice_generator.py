@@ -25,6 +25,61 @@ def _get_size(shape: Tuple[int, ...], itemsize: int) -> int:
     return np.product(shape) * itemsize
 
 
+def _closer_to_target_chunksize(
+    super_chunksize: Tuple[int, ...],
+    chunksize: Tuple[int, ...],
+) -> Tuple[int, ...]:
+    """
+    Given two shapes with the same number of dimensions,
+    find the super chunk size where all chunksizes could
+    fit.
+
+    Parameters
+    ----------
+    super_chunksize: Tuple[int, ...]
+        Super chunksize where all chunksizes must fit
+
+    chunksize: Tuple[int, ...]
+        Chunksizes of same shape within super chunksize
+
+    Raises
+    ------
+    ValueError:
+        If chunksizes don't have the same shape or if
+        chunksize > super_chunksize
+
+    Returns
+    -------
+    Tuple:
+        New super chunksize where all chunks shapes fit
+    """
+
+    super_chunksize_len = len(super_chunksize)
+    chunksize_len = len(chunksize)
+
+    if super_chunksize_len != chunksize_len:
+        raise ValueError("Chunksizes must have the same shape")
+
+    chunksize_check = [
+        True if super_chunksize[idx] > chunksize[idx] else False
+        for idx in range(super_chunksize_len)
+    ]
+
+    if False in chunksize_check:
+        raise ValueError(
+            f"Chunksize {chunksize} must be smaller than suepr chunk {super_chunksize}"
+        )
+
+    factors = np.array(
+        [
+            int(np.rint(super_chunksize[idx] / chunksize[idx]))
+            for idx in range(super_chunksize_len)
+        ]
+    )
+
+    return tuple(np.multiply(np.array(chunksize), factors))
+
+
 def _closer_to_target(
     shape1: Tuple[int, ...],
     shape2: Tuple[int, ...],

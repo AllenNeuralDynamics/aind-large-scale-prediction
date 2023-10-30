@@ -52,9 +52,13 @@ def main():
         )
     )
     prediction_chunksize = dataset_lazy_data.chunksize  # (64, 128, 128)
-    
-    return dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator
 
+    return (
+        dataset_lazy_data,
+        list_super_chunks,
+        prediction_chunksize,
+        zarr_iterator,
+    )
 
     # generators = []
     # for super_chunk in list_super_chunks:
@@ -71,33 +75,55 @@ def main():
     # for g in generators[0]:
     #     print(g)
 
-def eval_loading_super_chunk(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator):
+
+def eval_loading_super_chunk(
+    dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator
+):
     super_chunk = list_super_chunks[0]
     print(f"Total n blocks: {dataset_lazy_data[super_chunk].blocks.size}")
     data_in_memory = dataset_lazy_data[super_chunk].compute()
-    for i, zarr_iter_slice in enumerate(zarr_iterator.gen_slices(
-        arr_shape=data_in_memory.shape,
-        block_shape=prediction_chunksize,
-    )):
-        print(f"[{i}] - Shape for super chunk: {dataset_lazy_data[super_chunk].shape} - {data_in_memory.shape} slice ofdata in memory: {data_in_memory[zarr_iter_slice].shape}")
+    for i, zarr_iter_slice in enumerate(
+        zarr_iterator.gen_slices(
+            arr_shape=data_in_memory.shape,
+            block_shape=prediction_chunksize,
+        )
+    ):
+        print(
+            f"[{i}] - Shape for super chunk: {dataset_lazy_data[super_chunk].shape} - {data_in_memory.shape} slice ofdata in memory: {data_in_memory[zarr_iter_slice].shape}"
+        )
 
-def eval_loading_chunks_directly(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator):
+
+def eval_loading_chunks_directly(
+    dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator
+):
     super_chunk = list_super_chunks[0]
     print(f"Total n blocks: {dataset_lazy_data[super_chunk].blocks.size}")
 
-    for i, zarr_iter_slice in enumerate(zarr_iterator.gen_slices(
-        arr_shape=dataset_lazy_data[super_chunk].shape,
-        block_shape=prediction_chunksize,
-    )):
-        chunk_in_memory = dataset_lazy_data[super_chunk][zarr_iter_slice].compute()
-        print(f"[{i}] - Shape for super chunk: {dataset_lazy_data[super_chunk].shape} - {dataset_lazy_data[super_chunk].shape} slice ofdata in memory: {chunk_in_memory.shape}")
-
+    for i, zarr_iter_slice in enumerate(
+        zarr_iterator.gen_slices(
+            arr_shape=dataset_lazy_data[super_chunk].shape,
+            block_shape=prediction_chunksize,
+        )
+    ):
+        chunk_in_memory = dataset_lazy_data[super_chunk][
+            zarr_iter_slice
+        ].compute()
+        print(
+            f"[{i}] - Shape for super chunk: {dataset_lazy_data[super_chunk].shape} - {dataset_lazy_data[super_chunk].shape} slice ofdata in memory: {chunk_in_memory.shape}"
+        )
 
 
 if __name__ == "__main__":
     import cProfile
 
-    dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator = main()
-    cProfile.run('eval_loading_super_chunk(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator)', filename="super_chunk.dat")
+    (
+        dataset_lazy_data,
+        list_super_chunks,
+        prediction_chunksize,
+        zarr_iterator,
+    ) = main()
+    cProfile.run(
+        "eval_loading_super_chunk(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator)",
+        filename="super_chunk.dat",
+    )
     # cProfile.run('eval_loading_chunks_directly(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator)', filename="chunks_directly.dat")
-    

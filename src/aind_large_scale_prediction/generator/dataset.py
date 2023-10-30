@@ -7,6 +7,7 @@ import multiprocessing
 import time
 from typing import Optional, Tuple
 
+import dask.array as da
 import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
@@ -20,6 +21,7 @@ from aind_large_scale_prediction.generator.utils import (
 )
 from aind_large_scale_prediction.generator.zarr_slice_generator import (
     BlockedZarrArrayIterator,
+    _closer_to_target_chunksize,
 )
 from aind_large_scale_prediction.io.utils import extract_data
 
@@ -72,7 +74,6 @@ class ZarrSuperChunks(Dataset):
             raise ValueError(
                 "Please, provide the super chunk size or target_size_mb parameters"
             )
-
         # Lazy data after extraction. e.g., (1, 1, 1024, 512, 512) -> (1024, 512, 512)
         self.lazy_data = extract_data(lazy_data)
         self.super_chunk_size = super_chunk_size
@@ -202,9 +203,13 @@ class ZarrSuperChunks(Dataset):
                 target_size_mb=self.target_size_mb,
                 mode="cycle",
             )
+            new_super_chunk_size = _closer_to_target_chunksize(
+                super_chunksize=new_super_chunk_size,
+                chunksize=self.prediction_chunk_size,
+            )
 
             print(
-                f"Chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunk_size}"
+                f"Estimated chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunk_size}"
             )
 
         # Generating super chunk slices
@@ -305,12 +310,15 @@ class ZarrSuperChunks(Dataset):
 
             return True
 
-        number_pulled_chunks = self.pulled_chunks_per_super_chunk[
-            self.curr_super_chunk_pos.value
-        ]
-        total_chunks_super_chunk = self.internal_slice_sum[
-            self.curr_super_chunk_pos.value
-        ]
+        with self.pulled_chunks_per_super_chunk.get_lock():
+            number_pulled_chunks = self.pulled_chunks_per_super_chunk[
+                self.curr_super_chunk_pos.value
+            ]
+
+        with self.pulled_chunks_per_super_chunk.get_lock():
+            total_chunks_super_chunk = self.internal_slice_sum[
+                self.curr_super_chunk_pos.value
+            ]
 
         if number_pulled_chunks == total_chunks_super_chunk:
             return True
@@ -335,26 +343,17 @@ class ZarrSuperChunks(Dataset):
             super chunk
         """
 
-        self.locker.acquire()
-        try:
-            if self.__check_pulled_chunks():
-                with self.curr_super_chunk_pos.get_lock():
-                    self.curr_super_chunk_pos.value += 1
+        if self.__check_pulled_chunks():
+            with self.curr_super_chunk_pos.get_lock():
+                self.curr_super_chunk_pos.value += 1
 
-                # Setting super chunk in memory
-                self.super_chunk_in_memory = self.lazy_data[
-                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
-                ].compute()
+            # Setting super chunk in memory
+            self.super_chunk_in_memory = self.lazy_data[
+                self.super_chunk_slices[self.curr_super_chunk_pos.value]
+            ].compute()
 
-                with self.condition:
-                    self.condition.notify_all()
-
-        except BaseException as e:
-            raise BaseException(f"Error pulling data: {e}")
-
-        finally:
-            # Releasing lock
-            self.locker.release()
+            with self.condition:
+                self.condition.notify_all()
 
         next_super_chunk_position = self.__check_super_chunk_position(index)
 
@@ -468,6 +467,89 @@ class ZarrSuperChunks(Dataset):
         self.super_chunk_in_memory = None
 
 
+def helper_measure_dataloader_times(dataset: ZarrSuperChunks):
+    """
+    Measures the data loader times
+
+    Parameters
+    ----------
+    dataset: ZarrSuperChunks
+        Zarr super chunks dataset
+    """
+    dataloader = ZarrDataLoader(
+        dataset, batch_size=32, pin_memory=True, num_workers=8, shuffle=False
+    )
+
+    i = 0
+    times = []
+    before = time.time()
+    for _ in dataloader:
+        after = time.time()
+        time_taken = after - before
+        print(f"iter {i}: time taken = {time_taken}")
+        times.append(time_taken)
+        i += 1
+        before = time.time()
+    print(
+        f"average time (ignoring first iter): {sum(times[1:]) / (len(times) - 1)}"
+    )
+
+
+def measure_data_loader(start_method: str):
+    """
+    Measure the data loader times
+
+    Parameters
+    ----------
+    start_method: str
+        Start method for children processes
+    """
+
+    print("BENCHMARKING")
+
+    data_path = ""
+    lazy_data = da.zeros(
+        (1, 1, 5981, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int32
+    )
+
+    print(
+        f"Read dataset: {data_path} - dtype: {lazy_data.dtype} - Shape: {lazy_data.shape} - Chunksize: {lazy_data.chunksize}"
+    )
+
+    print(f"Array shape: {lazy_data.shape}")
+    prediction_chunk_size = (64, 64, 64)
+    target_size_mb = 512
+
+    locker = multiprocessing.Lock() if 2 else None
+    condition = multiprocessing.Condition()
+
+    zarr_dataset = ZarrSuperChunks(
+        lazy_data=lazy_data,
+        prediction_chunk_size=prediction_chunk_size,
+        super_chunk_size=None,
+        target_size_mb=target_size_mb,
+        locker=locker,
+        condition=condition,
+    )
+
+    helper_measure_dataloader_times(zarr_dataset)
+    zarr_dataset = ZarrSuperChunks(
+        lazy_data=lazy_data,
+        prediction_chunk_size=prediction_chunk_size,
+        super_chunk_size=None,
+        target_size_mb=target_size_mb,
+        locker=locker,
+        condition=condition,
+    )
+    print(f"Multiprocessing times with start method {start_method}:")
+    ctx = multiprocessing.get_context(start_method)
+    process = ctx.Process(
+        target=helper_measure_dataloader_times, args=(zarr_dataset,)
+    )
+    process.start()
+    process.join()
+
+
 def main():
     """
     Main function
@@ -476,23 +558,23 @@ def main():
 
     from aind_large_scale_prediction.io import ImageReaderFactory
 
-    BUCKET_NAME = "aind-open-data"
-    IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
-    TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
-    dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
-    multiscale = "2"
-    dataset_reader = ImageReaderFactory().create(
-        data_path=dataset_path,
-        parse_path=False,
-        multiscale=multiscale,
-    )
-    lazy_data = dataset_reader.as_dask_array().astype(np.int32)
-    data_path = dataset_reader.data_path
-
-    # data_path = dataset_reader.data_path
-    # lazy_data = da.zeros(
-    #     (1, 1, 5981, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int32
+    # BUCKET_NAME = "aind-open-data"
+    # IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
+    # TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
+    # dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
+    # multiscale = "2"
+    # dataset_reader = ImageReaderFactory().create(
+    #     data_path=dataset_path,
+    #     parse_path=False,
+    #     multiscale=multiscale,
     # )
+    # lazy_data = dataset_reader.as_dask_array().astype(np.int32)
+    # data_path = dataset_reader.data_path
+
+    data_path = ""
+    lazy_data = da.zeros(
+        (1, 1, 5981, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int32
+    )
 
     print(
         f"Read dataset: {data_path} - dtype: {lazy_data.dtype} - Shape: {lazy_data.shape} - Chunksize: {lazy_data.chunksize}"
@@ -502,11 +584,11 @@ def main():
     results = {}
     prediction_chunk_size = (64, 64, 64)
     target_size_mb = 512
-    for n_workers in range(0, 10):
+    for n_workers in range(0, 3):
         locker = multiprocessing.Lock() if n_workers else None
         condition = multiprocessing.Condition()
 
-        for batch_size in [8, 16]:
+        for batch_size in [32, 64]:  # , 128]:
             print(
                 f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
             )
@@ -520,11 +602,21 @@ def main():
                 condition=condition,
             )
 
+            # TODO Create a collate wrapper and a worker_init_fn
+            # - collate wrapper: Use it to handle chunks that do not
+            # have the prediction chunksize (borders of a tissue)
+            # - worker_init_fn: Use it to pass the pointer to the
+            # shared memory compartment
+
+            persistent_workers = True if n_workers else False
+
             zarr_data_loader = ZarrDataLoader(
                 zarr_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=n_workers,
+                pin_memory=True,  # To enable fast data transfers to GPU
+                persistent_workers=persistent_workers,
             )
 
             print("Starting the loading...")
@@ -547,6 +639,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    # import cProfile
-    # cProfile.run('main()', filename="compute_costs.dat")
+    # measure_data_loader(start_method="spawn")
+    # main()
+    import cProfile
+
+    cProfile.run("main()", filename="compute_costs.dat")
