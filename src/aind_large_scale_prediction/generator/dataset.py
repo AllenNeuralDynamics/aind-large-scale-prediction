@@ -5,11 +5,12 @@ to load the models
 
 import multiprocessing
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import dask.array as da
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
 from aind_large_scale_prediction._shared.types import ArrayLike
@@ -24,6 +25,76 @@ from aind_large_scale_prediction.generator.zarr_slice_generator import (
     _closer_to_target_chunksize,
 )
 from aind_large_scale_prediction.io.utils import extract_data
+
+
+class ZarrCustomBatch:
+    """
+    Custom zarr batch object to manage pin memory
+    """
+
+    def __init__(self, chunk_block: List[torch.Tensor]):
+        """
+        Init method
+
+        Parameters
+        ----------
+        chunk_block: torch.Tensor
+            Chunksize block based on the prediction
+            chunksize declared on the ZarrSuperChunks
+            dataset
+        """
+        self.chunk_block = torch.stack(chunk_block)
+
+    def pin_memory(self):
+        """
+        Custom pin memory for GPU loading optimization
+        """
+        self.chunk_block = self.chunk_block.pin_memory()
+        return self
+
+
+def collate_fn(
+    batch: List[torch.Tensor],
+    prediction_chunksize: Tuple[int, ...],
+    padding_value: int = 0,
+):
+    """
+    Collate function to deal with pulled chunks
+
+    Parameters
+    ----------
+    batch: List[torch.Tensor]
+        List of pulled torch tensors from
+        the super chunk.
+
+    prediction_chunksize: Tuple[int, ...]
+        Ideally, all the chunks must have this
+        shape. If not, we pad it.
+
+    padding_value: int
+        Padding value. Default: 0
+
+    Returns:
+    torch.Tensor
+        Returns the batch in a tensor format
+    """
+    len_chunks = len(prediction_chunksize)
+
+    # batch_tensor
+    batch_tensor = []
+    for batch_item in batch:
+        pad = (
+            prediction_chunksize[idx] - batch_item.shape[idx]
+            for idx in len_chunks
+        )
+        if batch_item.shape != prediction_chunksize:
+            batch_item = F.pad(
+                input=batch_item, pad=pad, mode="constant", value=padding_value
+            )
+
+        batch_tensor.append(batch_item)
+
+    return ZarrSuperChunks(batch_tensor)
 
 
 class ZarrSuperChunks(Dataset):
