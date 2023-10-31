@@ -6,7 +6,7 @@ to load the models
 import multiprocessing
 import time
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import dask.array as da
 import numpy as np
@@ -57,7 +57,6 @@ class ZarrCustomBatch:
 def collate_fn(
     batch: List[torch.Tensor],
     prediction_chunksize: Tuple[int, ...],
-    padding_value: int = 0,
 ):
     """
     Collate function to deal with pulled chunks
@@ -71,9 +70,6 @@ def collate_fn(
     prediction_chunksize: Tuple[int, ...]
         Ideally, all the chunks must have this
         shape. If not, we pad it.
-
-    padding_value: int
-        Padding value. Default: 0
 
     Returns:
     torch.Tensor
@@ -115,8 +111,8 @@ class ZarrSuperChunks(Dataset):
         prediction_chunk_size: Tuple[int, int, int],
         super_chunk_size: Optional[Tuple[int, int, int]] = None,
         target_size_mb: Optional[int] = None,
-        locker=None,
-        condition=None,
+        locker: Callable[[int]] = None,
+        condition: Callable = None,
     ) -> None:
         """
         Initializes the dataset class
@@ -142,6 +138,13 @@ class ZarrSuperChunks(Dataset):
         target_size_mb: Optional[int]
             Target size of the super chunks in memory.
             This parameter needs to be provided in
+
+        locker: Callable
+            Locker object from multiprocessing.Locker library
+            using the number of workers as a parameter
+
+        condition: Callable[[int]]
+            Condition object from multiprocessing.Condition library
         """
         super(ZarrSuperChunks, self).__init__()
 
@@ -186,7 +189,7 @@ class ZarrSuperChunks(Dataset):
 
     def __init_shared_array(
         self, shape: Tuple[int], dtype: type
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, multiprocessing.Array]:
         """
         Initializes a shared memory array where
         the super chunks will live one at a time.
@@ -202,9 +205,13 @@ class ZarrSuperChunks(Dataset):
 
         Returns
         -------
-        torch.Tensor
-            Tensor pointing to a shared memory
-            space
+        Tuple[torch.Tensor, multiprocessing.Array]
+            torch.Tensor:
+                Tensor pointing to a shared memory space
+
+            multiprocessing.Array:
+                Native shared memory object where torch
+                Tensor is pointing to
         """
         shared_array_base = multiprocessing.Array(
             typecode_or_type=map_dtype_to_ctype(dtype=dtype, exact=False),
@@ -214,11 +221,6 @@ class ZarrSuperChunks(Dataset):
         shared_array = np.ctypeslib.as_array(shared_array_base.get_obj())
         shared_array = shared_array.reshape(shape)
         shared_array = torch.from_numpy(shared_array)
-        print(
-            "Size of shared array in bytes: ",
-            getsizeof(shared_array),
-            shared_array.dtype,
-        )
 
         return shared_array, shared_array_base
 
@@ -313,7 +315,9 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator,
         )
 
-    def __map_index(self, index, next_batch: Optional[bool] = False) -> int:
+    def __map_index(
+        self, index: int, next_batch: Optional[bool] = False
+    ) -> int:
         """
         Maps the current worker index to the corresponding
         internal slice for the corresponding super chunk.
@@ -349,7 +353,7 @@ class ZarrSuperChunks(Dataset):
 
         return index - curr_sum
 
-    def __check_super_chunk_position(self, index) -> int:
+    def __check_super_chunk_position(self, index: int) -> int:
         """
         Increments the super chunk position as corresponds.
 
@@ -418,15 +422,17 @@ class ZarrSuperChunks(Dataset):
             super chunk
         """
 
+        # Checks if all chunks were returned for current super chunk
         if self.__check_pulled_chunks():
             with self.curr_super_chunk_pos.get_lock():
                 self.curr_super_chunk_pos.value += 1
 
-            # Setting super chunk in memory
+            # Setting new super chunk in memory
             self.super_chunk_in_memory = self.lazy_data[
                 self.super_chunk_slices[self.curr_super_chunk_pos.value]
             ].compute()
 
+            # Notify sleeping workers
             with self.condition:
                 self.condition.notify_all()
 
@@ -467,7 +473,7 @@ class ZarrSuperChunks(Dataset):
 
         return pulled_chunk
 
-    def __getitem__(self, index: int) -> np.array:
+    def __getitem__(self, index: int) -> torch.Tensor:
         """
         Get item procedure for the Lazy zarr dataset.
         It retrieves data based on the index variable
@@ -492,7 +498,7 @@ class ZarrSuperChunks(Dataset):
         worker_info = get_worker_info()
 
         if worker_info is None:
-            # Main workers - No necessity of parallelism
+            # Main worker - No necessity of parallelism
             if (
                 self.__check_super_chunk_position(index)
                 != self.curr_super_chunk_pos.value
@@ -500,10 +506,12 @@ class ZarrSuperChunks(Dataset):
             ):
                 self.curr_super_chunk_pos.value += 1
 
+                # Getting new super chunk
                 self.super_chunk_in_memory = self.lazy_data[
                     self.super_chunk_slices[self.curr_super_chunk_pos.value]
                 ].compute()
 
+            # Mapping current index to internal batch index
             curr_internal_super_chunk_position = self.__map_index(index)
 
             if (
@@ -526,10 +534,17 @@ class ZarrSuperChunks(Dataset):
 
         return pulled_prediction_chunk
 
-    def __len__(self):
+    def __len__(self) -> int:
         """
         Customized len method. Returns the sum
-        of the slices per super chunk
+        of the slices per super chunk.
+
+        Returns
+        -------
+        int:
+            Total sum of slices with size
+            prediction_chunksize that are in
+            every super chunk.
         """
         return sum(self.internal_slice_sum)
 
@@ -629,27 +644,27 @@ def main():
     """
     Main function
     """
-    import dask.array as da
+    # import dask.array as da
 
     from aind_large_scale_prediction.io import ImageReaderFactory
 
-    # BUCKET_NAME = "aind-open-data"
-    # IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
-    # TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
-    # dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
-    # multiscale = "2"
-    # dataset_reader = ImageReaderFactory().create(
-    #     data_path=dataset_path,
-    #     parse_path=False,
-    #     multiscale=multiscale,
-    # )
-    # lazy_data = dataset_reader.as_dask_array().astype(np.int32)
-    # data_path = dataset_reader.data_path
-
-    data_path = ""
-    lazy_data = da.zeros(
-        (1, 1, 5981, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int32
+    BUCKET_NAME = "aind-open-data"
+    IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
+    TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
+    dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
+    multiscale = "2"
+    dataset_reader = ImageReaderFactory().create(
+        data_path=dataset_path,
+        parse_path=False,
+        multiscale=multiscale,
     )
+    lazy_data = dataset_reader.as_dask_array().astype(np.int32)
+    data_path = dataset_reader.data_path
+
+    # data_path = ""
+    # lazy_data = da.zeros(
+    #     (1, 1, 5981, 512, 512), chunks=(1, 1, 128, 256, 256), dtype=np.int32
+    # )
 
     print(
         f"Read dataset: {data_path} - dtype: {lazy_data.dtype} - Shape: {lazy_data.shape} - Chunksize: {lazy_data.chunksize}"
@@ -681,10 +696,6 @@ def main():
                 condition=condition,
             )
 
-            # TODO Create a collate wrapper and a worker_init_fn
-            # - collate wrapper: Use it to handle chunks that do not
-            # have the prediction chunksize (borders of a tissue)
-
             persistent_workers = True if n_workers else False
 
             zarr_data_loader = ZarrDataLoader(
@@ -712,7 +723,6 @@ def main():
 
     print(results)
     locker = None
-    barrier = None
     condition = None
 
 
