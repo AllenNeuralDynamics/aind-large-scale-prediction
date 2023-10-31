@@ -83,14 +83,19 @@ def collate_fn(
             batch_item = torch.from_numpy(batch_item)
 
         if batch_item.shape != prediction_chunksize:
-            pad_shape = tuple(
-                prediction_chunksize[idx] - batch_item.shape[idx]
-                if prediction_chunksize[idx] - batch_item.shape[idx] > 0
-                else prediction_chunksize[idx]
+            # n-dim slices - batches 2D - 3D data
+            min_slices = tuple(
+                slice(0, min(prediction_chunksize[idx], batch_item.shape[idx]))
                 for idx in range(len_chunks)
             )
-            zeros = torch.zeros(size=pad_shape, dtype=batch_item.dtype)
-            batch_item = torch.concat(tensors=(batch_item, zeros), dim=0)
+
+            zeros = torch.zeros(
+                size=prediction_chunksize, dtype=batch_item.dtype
+            )
+
+            # Filling zeros array with batch data
+            zeros[min_slices] = batch_item[min_slices]
+            batch_item = zeros
 
         batch_tensor.append(batch_item)
 
@@ -111,7 +116,7 @@ class ZarrSuperChunks(Dataset):
         prediction_chunk_size: Tuple[int, int, int],
         super_chunk_size: Optional[Tuple[int, int, int]] = None,
         target_size_mb: Optional[int] = None,
-        locker: Callable[[int]] = None,
+        locker: Callable[[int], Callable] = None,
         condition: Callable = None,
     ) -> None:
         """
@@ -282,7 +287,7 @@ class ZarrSuperChunks(Dataset):
             )
             new_super_chunk_size = _closer_to_target_chunksize(
                 super_chunksize=new_super_chunk_size,
-                chunksize=self.prediction_chunk_size,
+                chunksize=self.lazy_data.chunksize,
             )
 
             print(
@@ -423,22 +428,34 @@ class ZarrSuperChunks(Dataset):
         """
 
         # Checks if all chunks were returned for current super chunk
-        if self.__check_pulled_chunks():
-            with self.curr_super_chunk_pos.get_lock():
-                self.curr_super_chunk_pos.value += 1
+        self.locker.acquire()
+        try:
+            if self.__check_pulled_chunks():
+                with self.curr_super_chunk_pos.get_lock():
+                    self.curr_super_chunk_pos.value += 1
 
-            # Setting new super chunk in memory
-            self.super_chunk_in_memory = self.lazy_data[
-                self.super_chunk_slices[self.curr_super_chunk_pos.value]
-            ].compute()
+                # Setting new super chunk in memory
+                self.super_chunk_in_memory = self.lazy_data[
+                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
+                ].compute()
 
-            # Notify sleeping workers
-            with self.condition:
-                self.condition.notify_all()
+                # Notify sleeping workers
+                with self.condition:
+                    self.condition.notify_all()
+
+        except BaseException as e:
+            raise BaseException(f"Error pulling data: {e}")
+
+        finally:
+            # Releasing lock
+            self.locker.release()
 
         next_super_chunk_position = self.__check_super_chunk_position(index)
 
-        if self.curr_super_chunk_pos.value != next_super_chunk_position:
+        if (
+            self.curr_super_chunk_pos.value != next_super_chunk_position
+            and next_super_chunk_position is not None
+        ):
             # If workers are ahead of current super chunk position, wait
             with self.condition:
                 while (
@@ -678,11 +695,11 @@ def main():
         collate_fn, prediction_chunksize=prediction_chunksize
     )
     target_size_mb = 512
-    for n_workers in range(0, 3):
+    for n_workers in range(2, 6):
         locker = multiprocessing.Lock() if n_workers else None
         condition = multiprocessing.Condition()
 
-        for batch_size in [32, 64]:  # , 128]:
+        for batch_size in [8, 16, 32]:
             print(
                 f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
             )
@@ -695,6 +712,7 @@ def main():
                 locker=locker,
                 condition=condition,
             )
+            print(f"Total super chunks: {zarr_dataset.__len__()}")
 
             persistent_workers = True if n_workers else False
 
@@ -710,8 +728,15 @@ def main():
 
             print("Starting the loading...")
 
-            for i, sample in enumerate(zarr_data_loader):
-                pass
+            try:
+                for i, sample in enumerate(zarr_data_loader):
+                    print(
+                        f"Batch {i}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()}"
+                    )
+
+            except BaseException as e:
+                print(e)
+                exit(1)
 
             end_time = time.time()
             results[f"Workers {n_workers} - batch_size {batch_size}"] = (
@@ -728,7 +753,7 @@ def main():
 
 if __name__ == "__main__":
     # measure_data_loader(start_method="spawn")
-    # main()
-    import cProfile
+    main()
+    # import cProfile
 
-    cProfile.run("main()", filename="compute_costs.dat")
+    # cProfile.run("main()", filename="compute_costs.dat")
