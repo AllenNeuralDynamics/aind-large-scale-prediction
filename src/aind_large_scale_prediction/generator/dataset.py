@@ -5,6 +5,7 @@ to load the models
 
 import multiprocessing
 import time
+from functools import partial
 from typing import List, Optional, Tuple
 
 import dask.array as da
@@ -32,7 +33,7 @@ class ZarrCustomBatch:
     Custom zarr batch object to manage pin memory
     """
 
-    def __init__(self, chunk_block: List[torch.Tensor]):
+    def __init__(self, batch_tensor: List[torch.Tensor]):
         """
         Init method
 
@@ -43,13 +44,13 @@ class ZarrCustomBatch:
             chunksize declared on the ZarrSuperChunks
             dataset
         """
-        self.chunk_block = torch.stack(chunk_block)
+        self.batch_tensor = torch.stack(batch_tensor)
 
     def pin_memory(self):
         """
         Custom pin memory for GPU loading optimization
         """
-        self.chunk_block = self.chunk_block.pin_memory()
+        self.batch_tensor = self.batch_tensor.pin_memory()
         return self
 
 
@@ -79,22 +80,25 @@ def collate_fn(
         Returns the batch in a tensor format
     """
     len_chunks = len(prediction_chunksize)
-
     # batch_tensor
     batch_tensor = []
     for batch_item in batch:
-        pad = (
-            prediction_chunksize[idx] - batch_item.shape[idx]
-            for idx in len_chunks
-        )
+        if isinstance(batch_item, np.ndarray):
+            batch_item = torch.from_numpy(batch_item)
+
         if batch_item.shape != prediction_chunksize:
-            batch_item = F.pad(
-                input=batch_item, pad=pad, mode="constant", value=padding_value
+            pad_shape = tuple(
+                prediction_chunksize[idx] - batch_item.shape[idx]
+                if prediction_chunksize[idx] - batch_item.shape[idx] > 0
+                else prediction_chunksize[idx]
+                for idx in range(len_chunks)
             )
+            zeros = torch.zeros(size=pad_shape, dtype=batch_item.dtype)
+            batch_item = torch.concat(tensors=(batch_item, zeros), dim=0)
 
         batch_tensor.append(batch_item)
 
-    return ZarrSuperChunks(batch_tensor)
+    return ZarrCustomBatch(batch_tensor)
 
 
 class ZarrSuperChunks(Dataset):
@@ -653,7 +657,11 @@ def main():
 
     print(f"Array shape: {lazy_data.shape}")
     results = {}
-    prediction_chunk_size = (64, 64, 64)
+    prediction_chunksize = (64, 64, 64)
+    # Creating partiall collate to provide prediction chunksize
+    partial_collate = partial(
+        collate_fn, prediction_chunksize=prediction_chunksize
+    )
     target_size_mb = 512
     for n_workers in range(0, 3):
         locker = multiprocessing.Lock() if n_workers else None
@@ -666,7 +674,7 @@ def main():
             start_time = time.time()
             zarr_dataset = ZarrSuperChunks(
                 lazy_data=lazy_data,
-                prediction_chunk_size=prediction_chunk_size,
+                prediction_chunk_size=prediction_chunksize,
                 super_chunk_size=None,
                 target_size_mb=target_size_mb,
                 locker=locker,
@@ -676,8 +684,6 @@ def main():
             # TODO Create a collate wrapper and a worker_init_fn
             # - collate wrapper: Use it to handle chunks that do not
             # have the prediction chunksize (borders of a tissue)
-            # - worker_init_fn: Use it to pass the pointer to the
-            # shared memory compartment
 
             persistent_workers = True if n_workers else False
 
@@ -688,6 +694,7 @@ def main():
                 num_workers=n_workers,
                 pin_memory=True,  # To enable fast data transfers to GPU
                 persistent_workers=persistent_workers,
+                collate_fn=partial_collate,
             )
 
             print("Starting the loading...")
