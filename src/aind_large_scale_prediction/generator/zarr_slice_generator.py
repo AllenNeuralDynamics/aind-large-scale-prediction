@@ -61,13 +61,13 @@ def _closer_to_target_chunksize(
         raise ValueError("Chunksizes must have the same shape")
 
     chunksize_check = [
-        True if super_chunksize[idx] > chunksize[idx] else False
+        True if super_chunksize[idx] >= chunksize[idx] else False
         for idx in range(super_chunksize_len)
     ]
 
     if False in chunksize_check:
         raise ValueError(
-            f"Chunksize {chunksize} must be smaller than suepr chunk {super_chunksize}"
+            f"Chunksize {chunksize} must be smaller than super chunk {super_chunksize}"
         )
 
     factors = np.array(

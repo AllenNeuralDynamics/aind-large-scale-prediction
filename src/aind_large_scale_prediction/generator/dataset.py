@@ -113,8 +113,8 @@ class ZarrSuperChunks(Dataset):
     def __init__(
         self,
         lazy_data: ArrayLike,
-        prediction_chunk_size: Tuple[int, int, int],
-        super_chunk_size: Optional[Tuple[int, int, int]] = None,
+        prediction_chunksize: Tuple[int, int, int],
+        super_chunksize: Optional[Tuple[int, int, int]] = None,
         target_size_mb: Optional[int] = None,
         locker: Callable[[int], Callable] = None,
         condition: Callable = None,
@@ -127,13 +127,13 @@ class ZarrSuperChunks(Dataset):
         lazy_data: ArrayLike
             Lazy array that contains the data to process
 
-        prediction_chunk_size: Tuple[int, int, int]
+        prediction_chunksize: Tuple[int, int, int]
             Prediction chunk size. Given a zarr array
             and an estimated/provided super chunk size,
             we will take a prediction chunk size from
             the super chunk that is already in memory.
 
-        super_chunk_size: Tuple[int, int, int]
+        super_chunksize: Tuple[int, int, int]
             Given a lazy array (not loaded in memory),
             this parameter determines how many chunks
             will be moved to memory once at a time.
@@ -153,14 +153,14 @@ class ZarrSuperChunks(Dataset):
         """
         super(ZarrSuperChunks, self).__init__()
 
-        if super_chunk_size is None and target_size_mb is None:
+        if super_chunksize is None and target_size_mb is None:
             raise ValueError(
                 "Please, provide the super chunk size or target_size_mb parameters"
             )
         # Lazy data after extraction. e.g., (1, 1, 1024, 512, 512) -> (1024, 512, 512)
         self.lazy_data = extract_data(lazy_data)
-        self.super_chunk_size = super_chunk_size
-        self.prediction_chunk_size = prediction_chunk_size
+        self.super_chunksize = super_chunksize
+        self.prediction_chunksize = prediction_chunksize
         self.target_size_mb = target_size_mb
 
         # Multiprocessing variables
@@ -170,7 +170,7 @@ class ZarrSuperChunks(Dataset):
 
         # Initialization of super chunks
         (
-            self.super_chunk_size,
+            self.super_chunksize,
             self.super_chunk_slices,
             self.internal_slices,
             self.zarr_iterator,
@@ -181,7 +181,7 @@ class ZarrSuperChunks(Dataset):
             self.super_chunk_in_memory,
             self.array_pointer,
         ) = self.__init_shared_array(
-            shape=self.super_chunk_size, dtype=self.lazy_data.dtype
+            shape=self.super_chunksize, dtype=self.lazy_data.dtype
         )
 
         # Number of slices per super chunk
@@ -243,7 +243,7 @@ class ZarrSuperChunks(Dataset):
         -------
         Tuple[ Tuple, Tuple[Tuple], Tuple[Tuple], Generator]
 
-            new_super_chunk_size [Tuple]: New super chunk size that was
+            new_super_chunksize [Tuple]: New super chunk size that was
             estimated if target_size_mb was provided.
 
             super_chunk_slices [ Tuple[Tuple] ]: Generated super chunk
@@ -255,7 +255,7 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator [ Generator ]: Generator of slices per dimension.
         """
 
-        if self.target_size_mb is None and self.super_chunk_size is None:
+        if self.target_size_mb is None and self.super_chunksize is None:
             raise ValueError(
                 "Please, provide a target size or super chunk size."
             )
@@ -278,27 +278,27 @@ class ZarrSuperChunks(Dataset):
         zarr_iterator = BlockedZarrArrayIterator()
 
         # Overwriting super chunk size if target size in mb is provided
-        new_super_chunk_size = self.super_chunk_size
+        new_super_chunksize = self.super_chunksize
         if self.target_size_mb:
-            new_super_chunk_size = zarr_iterator.get_block_shape(
+            new_super_chunksize = zarr_iterator.get_block_shape(
                 arr=self.lazy_data,
                 target_size_mb=self.target_size_mb,
                 mode="cycle",
             )
-            new_super_chunk_size = _closer_to_target_chunksize(
-                super_chunksize=new_super_chunk_size,
-                chunksize=self.lazy_data.chunksize,
+            new_super_chunksize = _closer_to_target_chunksize(
+                super_chunksize=new_super_chunksize,
+                chunksize=self.lazy_data.chunksize,  # self.prediction_chunksize
             )
 
             print(
-                f"Estimated chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunk_size}"
+                f"Estimated chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunksize}"
             )
 
         # Generating super chunk slices
         super_chunk_slices = tuple(
             zarr_iterator.gen_slices(
                 arr_shape=self.lazy_data.shape,
-                block_shape=new_super_chunk_size,
+                block_shape=new_super_chunksize,
             )
         )
 
@@ -307,14 +307,14 @@ class ZarrSuperChunks(Dataset):
             tuple(
                 zarr_iterator.gen_slices(
                     arr_shape=self.lazy_data[super_chunk_slice].shape,
-                    block_shape=self.prediction_chunk_size,
+                    block_shape=self.prediction_chunksize,
                 )
             )
             for super_chunk_slice in super_chunk_slices
         )
 
         return (
-            new_super_chunk_size,
+            new_super_chunksize,
             super_chunk_slices,
             internal_slices,
             zarr_iterator,
@@ -624,7 +624,7 @@ def measure_data_loader(start_method: str):
     )
 
     print(f"Array shape: {lazy_data.shape}")
-    prediction_chunk_size = (64, 64, 64)
+    prediction_chunksize = (64, 64, 64)
     target_size_mb = 512
 
     locker = multiprocessing.Lock() if 2 else None
@@ -632,8 +632,8 @@ def measure_data_loader(start_method: str):
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
-        prediction_chunk_size=prediction_chunk_size,
-        super_chunk_size=None,
+        prediction_chunksize=prediction_chunksize,
+        super_chunksize=None,
         target_size_mb=target_size_mb,
         locker=locker,
         condition=condition,
@@ -642,8 +642,8 @@ def measure_data_loader(start_method: str):
     helper_measure_dataloader_times(zarr_dataset)
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
-        prediction_chunk_size=prediction_chunk_size,
-        super_chunk_size=None,
+        prediction_chunksize=prediction_chunksize,
+        super_chunksize=None,
         target_size_mb=target_size_mb,
         locker=locker,
         condition=condition,
@@ -655,6 +655,45 @@ def measure_data_loader(start_method: str):
     )
     process.start()
     process.join()
+
+
+def reshape_dataset_to_prediction_chunks(
+    lazy_data: ArrayLike, prediction_chunksize: Tuple[int, ...]
+) -> ArrayLike:
+    """
+    Reshape dataset to have multiples of
+    the prediction chunksize
+
+    Parameters
+    ----------
+    lazy_data: ArrayLike
+        Lazy dataset in dask
+
+    prediction_chunksize: Tuple[int, ...]
+        Prediction chunksize we are going to use
+        to pull chunks from the super chunk
+
+    Returns
+    -------
+    ArrayLike
+        Modified array with the new shape
+    """
+
+    new_factor_shape = tuple(
+        int(
+            prediction_chunksize[idx]
+            * np.ceil(lazy_data.shape[idx] / prediction_chunksize[idx])
+        )
+        for idx in range(len(prediction_chunksize))
+    )
+    new_lazy_data = da.zeros(new_factor_shape, dtype=lazy_data.dtype)
+    new_lazy_data[
+        : lazy_data.shape[0],
+        : lazy_data.shape[1],
+        : lazy_data.shape[2],
+    ] = lazy_data
+
+    return new_lazy_data
 
 
 def main():
@@ -675,7 +714,7 @@ def main():
         parse_path=False,
         multiscale=multiscale,
     )
-    lazy_data = dataset_reader.as_dask_array().astype(np.int32)
+    lazy_data = extract_data(dataset_reader.as_dask_array().astype(np.int32))
     data_path = dataset_reader.data_path
 
     # data_path = ""
@@ -690,24 +729,31 @@ def main():
     print(f"Array shape: {lazy_data.shape}")
     results = {}
     prediction_chunksize = (64, 64, 64)
+
+    lazy_data = reshape_dataset_to_prediction_chunks(
+        lazy_data=lazy_data, prediction_chunksize=prediction_chunksize
+    )
+    print(f"New array shape: {lazy_data.shape}")
+
     # Creating partiall collate to provide prediction chunksize
     partial_collate = partial(
         collate_fn, prediction_chunksize=prediction_chunksize
     )
-    target_size_mb = 512
-    for n_workers in range(2, 6):
+    super_chunksize = None  # (384, 768, 768)
+    target_size_mb = 512  # None
+    for n_workers in range(0, 4):
         locker = multiprocessing.Lock() if n_workers else None
         condition = multiprocessing.Condition()
 
-        for batch_size in [8, 16, 32]:
+        for batch_size in [16, 64]:
             print(
                 f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
             )
             start_time = time.time()
             zarr_dataset = ZarrSuperChunks(
                 lazy_data=lazy_data,
-                prediction_chunk_size=prediction_chunksize,
-                super_chunk_size=None,
+                prediction_chunksize=prediction_chunksize,
+                super_chunksize=super_chunksize,
                 target_size_mb=target_size_mb,
                 locker=locker,
                 condition=condition,
