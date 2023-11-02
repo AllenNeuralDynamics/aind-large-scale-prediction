@@ -28,6 +28,45 @@ from aind_large_scale_prediction.io import ImageReaderFactory
 from aind_large_scale_prediction.io.utils import extract_data
 
 
+def reshape_dataset_to_prediction_chunks(
+    lazy_data: ArrayLike, prediction_chunksize: Tuple[int, ...]
+) -> ArrayLike:
+    """
+    Reshape dataset to have multiples of
+    the prediction chunksize
+
+    Parameters
+    ----------
+    lazy_data: ArrayLike
+        Lazy dataset in dask
+
+    prediction_chunksize: Tuple[int, ...]
+        Prediction chunksize we are going to use
+        to pull chunks from the super chunk
+
+    Returns
+    -------
+    ArrayLike
+        Modified array with the new shape
+    """
+
+    new_factor_shape = tuple(
+        int(
+            prediction_chunksize[idx]
+            * np.ceil(lazy_data.shape[idx] / prediction_chunksize[idx])
+        )
+        for idx in range(len(prediction_chunksize))
+    )
+    new_lazy_data = da.zeros(new_factor_shape, dtype=lazy_data.dtype)
+    new_lazy_data[
+        : lazy_data.shape[0],
+        : lazy_data.shape[1],
+        : lazy_data.shape[2],
+    ] = lazy_data
+
+    return new_lazy_data
+
+
 class ZarrCustomBatch:
     """
     Custom zarr batch object to manage pin memory
@@ -655,45 +694,6 @@ def measure_data_loader(start_method: str):
     )
     process.start()
     process.join()
-
-
-def reshape_dataset_to_prediction_chunks(
-    lazy_data: ArrayLike, prediction_chunksize: Tuple[int, ...]
-) -> ArrayLike:
-    """
-    Reshape dataset to have multiples of
-    the prediction chunksize
-
-    Parameters
-    ----------
-    lazy_data: ArrayLike
-        Lazy dataset in dask
-
-    prediction_chunksize: Tuple[int, ...]
-        Prediction chunksize we are going to use
-        to pull chunks from the super chunk
-
-    Returns
-    -------
-    ArrayLike
-        Modified array with the new shape
-    """
-
-    new_factor_shape = tuple(
-        int(
-            prediction_chunksize[idx]
-            * np.ceil(lazy_data.shape[idx] / prediction_chunksize[idx])
-        )
-        for idx in range(len(prediction_chunksize))
-    )
-    new_lazy_data = da.zeros(new_factor_shape, dtype=lazy_data.dtype)
-    new_lazy_data[
-        : lazy_data.shape[0],
-        : lazy_data.shape[1],
-        : lazy_data.shape[2],
-    ] = lazy_data
-
-    return new_lazy_data
 
 
 def create_data_loader(
