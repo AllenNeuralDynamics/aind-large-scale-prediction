@@ -14,17 +14,17 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
-from aind_large_scale_prediction._shared.types import ArrayLike
+from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 from aind_large_scale_prediction.generator.dataloader import ZarrDataLoader
 from aind_large_scale_prediction.generator.utils import (
     find_position_in_total_sum,
-    getsizeof,
     map_dtype_to_ctype,
 )
 from aind_large_scale_prediction.generator.zarr_slice_generator import (
     BlockedZarrArrayIterator,
     _closer_to_target_chunksize,
 )
+from aind_large_scale_prediction.io import ImageReaderFactory
 from aind_large_scale_prediction.io.utils import extract_data
 
 
@@ -694,6 +694,97 @@ def reshape_dataset_to_prediction_chunks(
     ] = lazy_data
 
     return new_lazy_data
+
+
+def create_data_loader(
+    dataset_path: PathLike,
+    multiscale: str,
+    target_size_mb: int,
+    prediction_chunksize: Tuple[int, ...],
+    n_workers: int,
+    batch_size: int,
+    dtype: type = np.float32,
+    super_chunksize: Optional[Tuple[int, ...]] = None,
+):
+    """
+    Creates zarr data loader.
+
+    Parameters
+    ----------
+    dataset_path: PathLike
+        Path where the dataset is stored. S3 paths are allowed
+        in the form s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}
+
+    multiscale: str
+        Dataset multiscale. e.g., "2"
+
+    target_size_mb: int
+        Size in megabytes for each super chunk
+
+    prediction_chunksize: Tuple[int, ...]
+        Chunksize that will be sent toi the model
+
+    n_workers: int
+        Number of workers that will pull data
+
+    batch_size: int
+        Batch size
+
+    dtype: type
+        Dtype the data will be cast to. Be carefull with
+        losing color information. Default: np.float32
+
+    super_chunksize: Optional[Tuple[int, ...]]
+        Super chunksize shape. If target_size_mb is None,
+        then the super chunksize will be used for creating
+        the super chunks. Default: None
+
+    Returns
+    -------
+    Tuple[ZarrSuperChunks, ZarrDataLoader]
+        ZarrSuperChunks pytorch dataset and
+        the ZarrDataLoader objects
+    """
+    dataset_reader = ImageReaderFactory().create(
+        data_path=dataset_path,
+        parse_path=False,
+        multiscale=multiscale,
+    )
+    lazy_data = extract_data(dataset_reader.as_dask_array().astype(dtype))
+
+    lazy_data = reshape_dataset_to_prediction_chunks(
+        lazy_data=lazy_data, prediction_chunksize=prediction_chunksize
+    )
+
+    partial_collate = partial(
+        collate_fn, prediction_chunksize=prediction_chunksize
+    )
+
+    locker = multiprocessing.Lock() if n_workers else None
+    condition = multiprocessing.Condition()
+
+    zarr_dataset = ZarrSuperChunks(
+        lazy_data=lazy_data,
+        prediction_chunksize=prediction_chunksize,
+        super_chunksize=super_chunksize,
+        target_size_mb=target_size_mb,
+        locker=locker,
+        condition=condition,
+    )
+
+    persistent_workers = True if n_workers else False
+
+    zarr_data_loader = ZarrDataLoader(
+        zarr_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=n_workers,
+        pin_memory=True,  # To enable fast data transfers to GPU
+        persistent_workers=persistent_workers,
+        collate_fn=partial_collate,
+    )
+
+    return zarr_data_loader, zarr_dataset
 
 
 def main():
