@@ -3,6 +3,7 @@ Defines the PyTorch Datasets classes
 to load the models
 """
 
+import logging
 import multiprocessing
 import time
 from functools import partial
@@ -706,6 +707,7 @@ def create_data_loader(
     dtype: type = np.float32,
     super_chunksize: Optional[Tuple[int, ...]] = None,
     lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
+    logger: Optional[logging.Logger] = None,
 ):
     """
     Creates zarr data loader.
@@ -744,12 +746,23 @@ def create_data_loader(
         Lazy callback function to process lazy dataset
         before the data loader object is created.
 
+    logger: Optional[logging.Logger]
+        Logger object to print how the volume is changing
+
     Returns
     -------
     Tuple[ZarrSuperChunks, ZarrDataLoader]
         ZarrSuperChunks pytorch dataset and
         the ZarrDataLoader objects
     """
+
+    def _print(message: str):
+        """
+        Helper to print
+        """
+        if logger is not None:
+            logger.info(message)
+
     dataset_reader = ImageReaderFactory().create(
         data_path=dataset_path,
         parse_path=False,
@@ -757,12 +770,17 @@ def create_data_loader(
     )
     lazy_data = extract_data(dataset_reader.as_dask_array().astype(dtype))
 
+    _print(f"Initial shape: {lazy_data.shape}")
+
     lazy_data = reshape_dataset_to_prediction_chunks(
         lazy_data=lazy_data, prediction_chunksize=prediction_chunksize
     )
 
+    _print(f"Shape after adding zeros in borders: {lazy_data.shape}")
+
     if lazy_callback_fn is not None:
         lazy_data = lazy_callback_fn(lazy_data)
+        _print(f"Shape after call back function: {lazy_data.shape}")
 
     partial_collate = partial(
         collate_fn, prediction_chunksize=prediction_chunksize
