@@ -705,6 +705,7 @@ def create_data_loader(
     batch_size: int,
     dtype: type = np.float32,
     super_chunksize: Optional[Tuple[int, ...]] = None,
+    lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
 ):
     """
     Creates zarr data loader.
@@ -739,6 +740,10 @@ def create_data_loader(
         then the super chunksize will be used for creating
         the super chunks. Default: None
 
+    lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]]
+        Lazy callback function to process lazy dataset
+        before the data loader object is created.
+
     Returns
     -------
     Tuple[ZarrSuperChunks, ZarrDataLoader]
@@ -755,6 +760,9 @@ def create_data_loader(
     lazy_data = reshape_dataset_to_prediction_chunks(
         lazy_data=lazy_data, prediction_chunksize=prediction_chunksize
     )
+
+    if lazy_callback_fn is not None:
+        lazy_data = lazy_callback_fn(lazy_data)
 
     partial_collate = partial(
         collate_fn, prediction_chunksize=prediction_chunksize
