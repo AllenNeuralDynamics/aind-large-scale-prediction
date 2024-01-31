@@ -8,6 +8,7 @@ from typing import Tuple
 
 import dask
 import dask.array as da
+import matplotlib.pyplot as plt
 import numpy as np
 import tifffile as tif
 from dask.distributed import Client, LocalCluster, performance_report
@@ -135,6 +136,10 @@ def get_projection_montage(
 
 
 def get_dispim_config():
+    """
+    Returns dispim configuration
+    of the microscope
+    """
     return {
         "resolution": {"x": 0.298, "y": 0.298, "z": 0.176},
         "angle_degrees": 45,  # with respect to xy
@@ -538,7 +543,7 @@ def transform_with_dask(
         Makes the voxel size isotropic
     """
     original_image_dask = da.from_zarr(f"{dataset_path}/{multiscale}")[
-        0, 0, ...
+        0, 0, 5000:5500, 700:1100, 800:1200
     ]
 
     start = time()
@@ -568,13 +573,66 @@ def main():
     """
     Main function
     """
+
     dataset_path = "s3://aind-open-data/diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr/647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
-    multiscale = 3
+    # dataset_path = "s3://aind-open-data/diSPIM_662960_2023-08-10_13-20-37/diSPIM.zarr/960_ventr_X_0003_Y_0000_Z_0000_ch_561.zarr"
+    # dataset_path = "s3://aind-open-data/HCR_663983_2023-10-10_09-35-12/SPIM.ome.zarr/983_diSPIM_X_0002_Y_0000_Z_0000_ch_488.zarr"
+    multiscale = 0
     camera = 1
     make_isotropy_voxels = False
     # transform_in_memory(dataset_path, multiscale, camera, make_isotropy_voxels)
     transform_with_dask(dataset_path, multiscale, camera, make_isotropy_voxels)
 
 
+def plot_array_images(imgs, title, top=1.2):
+    """
+    Plots the array image
+    """
+    fig = plt.figure(figsize=(10, 10))
+    fig.suptitle(title, fontsize=10)
+    for k, img in enumerate(imgs):
+        vmin, vmax = np.percentile(img, (0.1, 99))
+        plt.subplot(1, 3, k + 1)
+        plt.imshow(img, vmin=vmin, vmax=vmax, cmap="gray")
+
+    fig.tight_layout()
+    # fig.subplots_adjust(top=top)
+    plt.show()
+
+
+def visualize_data():
+    """
+    Small function to visualize data
+    """
+
+    gaussian_psf_path = "/Users/camilo.laiton/repositories/dispim_psf_estimation/initial_psf.tif"
+    gaussian_psf = tif.imread(gaussian_psf_path)
+
+    dataset_path = "s3://aind-open-data/HCR_Christian-ME-New-Lasers_2023-10-05_11-37-41_fused/channel_488.zarr"
+    multiscale = 0
+
+    lazy_image = da.from_zarr(f"{dataset_path}/{multiscale}")[0, 0, ...]
+    z, y, x = lazy_image.shape
+    print("Image shape: ", lazy_image.shape)
+    s = 128
+    image_data = lazy_image[
+        (z // 2) - s : (z // 2),
+        (y // 2) - s : (y // 2),
+        (x // 2) - s * 2 : (x // 2) - s,
+    ].compute()
+
+    print("block shape: ", image_data.shape)
+
+    for axis in range(0, 3):
+        axis_name = ["XY", "ZX", "ZY"]
+        plot_array_images(
+            imgs=[
+                np.max(image_data, axis=axis),
+                np.max(gaussian_psf, axis=axis),
+            ],
+            title=f"Gaussian PSF vs Real PSF - {axis_name[axis]}",
+        )
+
+
 if __name__ == "__main__":
-    main()
+    visualize_data()

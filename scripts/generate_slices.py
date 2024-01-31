@@ -6,6 +6,9 @@ from aind_large_scale_prediction.io.utils import extract_data
 
 
 def main():
+    """
+    Main generate slice example
+    """
     BUCKET_NAME = "aind-open-data"
     IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
     TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
@@ -96,6 +99,9 @@ def eval_loading_super_chunk(
 def eval_loading_chunks_directly(
     dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator
 ):
+    """
+    Evaluating slicer
+    """
     super_chunk = list_super_chunks[0]
     print(f"Total n blocks: {dataset_lazy_data[super_chunk].blocks.size}")
 

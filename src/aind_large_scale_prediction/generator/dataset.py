@@ -11,6 +11,7 @@ from typing import Callable, List, Optional, Tuple
 
 import dask.array as da
 import numpy as np
+import tensorstore as ts
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
@@ -914,9 +915,63 @@ def main():
     condition = None
 
 
+def open_tensorstore(path, driver):
+    """
+    Uploads segmentation mask stored as a directory of shard files.
+
+    Parameters
+    ----------
+    path : str
+        Path to directory containing shard files.
+
+    Returns
+    -------
+    sparse_volume : dict
+        Sparse image volume.
+
+    """
+    ts_arr = ts.open(
+        {
+            "driver": driver,
+            "kvstore": {
+                "driver": "s3",  #'gcs',
+                "bucket": "aind-open-data",  #'allen-nd-goog',
+                "path": path,
+            },
+        }
+    ).result()
+    return ts_arr[ts.d["channel"][0]]
+
+
+def test_tensorstore():
+    import numpy as np
+
+    BUCKET_NAME = "aind-open-data"
+    IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
+    TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
+    dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
+    multiscale = "2"
+    dataset_path_2 = f"/{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}/{multiscale}"
+
+    dataset = ts.open(
+        {
+            "driver": "zarr",
+            "kvstore": {
+                "driver": "http",
+                "base_url": "https://s3-us-west-2.amazonaws.com",
+                "path": dataset_path_2,
+            },
+        }
+    ).result()
+
+    arr = dataset.read().result()
+    print(arr.shape)
+
+
 if __name__ == "__main__":
     # measure_data_loader(start_method="spawn")
-    main()
+    # main()
+    test_tensorstore()
     # import cProfile
 
     # cProfile.run("main()", filename="compute_costs.dat")
