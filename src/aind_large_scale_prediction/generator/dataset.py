@@ -4,15 +4,14 @@ to load the models
 """
 
 import logging
-import multiprocessing
 import time
 from functools import partial
 from typing import Callable, List, Optional, Tuple
 
 import dask.array as da
 import numpy as np
-import tensorstore as ts
 import torch
+import torch.multiprocessing as multiprocessing
 import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
@@ -74,7 +73,11 @@ class ZarrCustomBatch:
     Custom zarr batch object to manage pin memory
     """
 
-    def __init__(self, batch_tensor: List[torch.Tensor]):
+    def __init__(
+        self,
+        batch_tensor: List[torch.Tensor],
+        device: Optional[torch.cuda.Device] = None,
+    ):
         """
         Init method
 
@@ -87,6 +90,9 @@ class ZarrCustomBatch:
         """
         self.batch_tensor = torch.stack(batch_tensor)
 
+        if device is not None:
+            self.batch_tensor = self.batch_tensor.to(device)
+
     def pin_memory(self):
         """
         Custom pin memory for GPU loading optimization
@@ -98,6 +104,7 @@ class ZarrCustomBatch:
 def collate_fn(
     batch: List[torch.Tensor],
     prediction_chunksize: Tuple[int, ...],
+    device: Optional[torch.cuda.Device] = None,
 ):
     """
     Collate function to deal with pulled chunks
@@ -140,7 +147,7 @@ def collate_fn(
 
         batch_tensor.append(batch_item)
 
-    return ZarrCustomBatch(batch_tensor)
+    return ZarrCustomBatch(batch_tensor, device)
 
 
 class ZarrSuperChunks(Dataset):
@@ -705,6 +712,8 @@ def create_data_loader(
     prediction_chunksize: Tuple[int, ...],
     n_workers: int,
     batch_size: int,
+    device: int,
+    pin_memory: bool,
     dtype: type = np.float32,
     super_chunksize: Optional[Tuple[int, ...]] = None,
     lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
@@ -783,8 +792,16 @@ def create_data_loader(
         lazy_data = lazy_callback_fn(lazy_data)
         _print(f"Shape after call back function: {lazy_data.shape}")
 
+    multiprocessing_context = None
+    if device is not None:
+        device = torch.device(device)
+        multiprocessing_context = "spawn"
+        print(
+            f"Torch device: {device} and mp context {multiprocessing_context}"
+        )
+
     partial_collate = partial(
-        collate_fn, prediction_chunksize=prediction_chunksize
+        collate_fn, prediction_chunksize=prediction_chunksize, device=device
     )
 
     locker = multiprocessing.Lock() if n_workers else None
@@ -806,9 +823,10 @@ def create_data_loader(
         batch_size=batch_size,
         shuffle=False,
         num_workers=n_workers,
-        pin_memory=True,  # To enable fast data transfers to GPU
+        pin_memory=pin_memory,  # To enable fast data transfers to GPU
         persistent_workers=persistent_workers,
         collate_fn=partial_collate,
+        multiprocessing_context=multiprocessing_context,
     )
 
     return zarr_data_loader, zarr_dataset
@@ -915,63 +933,8 @@ def main():
     condition = None
 
 
-def open_tensorstore(path, driver):
-    """
-    Uploads segmentation mask stored as a directory of shard files.
-
-    Parameters
-    ----------
-    path : str
-        Path to directory containing shard files.
-
-    Returns
-    -------
-    sparse_volume : dict
-        Sparse image volume.
-
-    """
-    ts_arr = ts.open(
-        {
-            "driver": driver,
-            "kvstore": {
-                "driver": "s3",  #'gcs',
-                "bucket": "aind-open-data",  #'allen-nd-goog',
-                "path": path,
-            },
-        }
-    ).result()
-    return ts_arr[ts.d["channel"][0]]
-
-
-def test_tensorstore():
-    import numpy as np
-
-    BUCKET_NAME = "aind-open-data"
-    IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
-    TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
-    dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
-    multiscale = "2"
-    dataset_path_2 = f"/{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}/{multiscale}"
-
-    dataset = ts.open(
-        {
-            "driver": "zarr",
-            "kvstore": {
-                "driver": "http",
-                "base_url": "https://s3-us-west-2.amazonaws.com",
-                "path": dataset_path_2,
-            },
-        }
-    ).result()
-
-    arr = dataset.read().result()
-    print(arr.shape)
-
-
 if __name__ == "__main__":
     # measure_data_loader(start_method="spawn")
-    # main()
-    test_tensorstore()
+    main()
     # import cProfile
-
     # cProfile.run("main()", filename="compute_costs.dat")

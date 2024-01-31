@@ -16,9 +16,15 @@ class _RepeatSampler(object):
     """
 
     def __init__(self, sampler):
+        """
+        Constructor
+        """
         self.sampler = sampler
 
     def __iter__(self):
+        """
+        Iteration method
+        """
         while True:
             yield from iter(self.sampler)
 
