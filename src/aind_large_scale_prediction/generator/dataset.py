@@ -19,6 +19,7 @@ from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 from aind_large_scale_prediction.generator.dataloader import ZarrDataLoader
 from aind_large_scale_prediction.generator.utils import (
     find_position_in_total_sum,
+    get_suggested_cpu_count,
     map_dtype_to_ctype,
 )
 from aind_large_scale_prediction.generator.zarr_slice_generator import (
@@ -728,6 +729,7 @@ def create_data_loader(
     dtype: type = np.float32,
     super_chunksize: Optional[Tuple[int, ...]] = None,
     lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
+    override_suggested_cpus: Optional[bool] = True,
     logger: Optional[logging.Logger] = None,
 ):
     """
@@ -767,6 +769,10 @@ def create_data_loader(
         Lazy callback function to process lazy dataset
         before the data loader object is created.
 
+    override_suggested_cpus: Optional[bool]
+        Overrides the suggested number of CPUs used.
+        Default: True
+
     logger: Optional[logging.Logger]
         Logger object to print how the volume is changing
 
@@ -776,6 +782,13 @@ def create_data_loader(
         ZarrSuperChunks pytorch dataset and
         the ZarrDataLoader objects
     """
+    suggested_number_cpus = get_suggested_cpu_count()
+
+    if override_suggested_cpus and suggested_number_cpus != n_workers:
+        logger.info(
+            f"Setting suggested number of CPUs in this system. From {n_workers} to {suggested_number_cpus}"
+        )
+        n_workers = suggested_number_cpus
 
     def _print(message: str):
         """
