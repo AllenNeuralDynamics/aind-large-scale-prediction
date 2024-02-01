@@ -3,6 +3,7 @@ Generator utility functions
 """
 
 import ctypes
+import os
 from collections import deque
 from itertools import chain
 from sys import getsizeof, stderr
@@ -14,6 +15,23 @@ try:
     from reprlib import repr
 except ImportError:
     pass
+
+
+def get_suggested_cpu_count():
+    """
+    Returns the suggested number of CPUs
+    to be used in a system
+    """
+    cpus = None
+    try:
+        # Attempt to use os.sched_getaffinity if available (Linux specific)
+        cpus = os.sched_getaffinity(0)
+        cpus = len(cpus)
+    except AttributeError:
+        # Fallback to os.cpu_count() if os.sched_getaffinity is not available
+        cpus = os.cpu_count()
+
+    return cpus
 
 
 def total_size(o, handlers={}, verbose=False):

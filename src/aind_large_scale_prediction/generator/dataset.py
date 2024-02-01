@@ -58,12 +58,23 @@ def reshape_dataset_to_prediction_chunks(
         )
         for idx in range(len(prediction_chunksize))
     )
-    new_lazy_data = da.zeros(new_factor_shape, dtype=lazy_data.dtype)
-    new_lazy_data[
-        : lazy_data.shape[0],
-        : lazy_data.shape[1],
-        : lazy_data.shape[2],
-    ] = lazy_data
+
+    pad_width = tuple(
+        (
+            0,
+            int(
+                new_factor_shape[idx] - lazy_data.shape[idx]
+            ),  # padding the right and bottom of the volume only
+        )
+        for idx in range(len(new_factor_shape))
+    )
+
+    new_lazy_data = da.pad(
+        array=lazy_data,
+        pad_width=pad_width,
+        mode="constant",
+        constant_values=0,
+    )
 
     return new_lazy_data
 
