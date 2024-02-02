@@ -65,10 +65,10 @@ def main():
         multiprocessing.set_start_method("spawn", force=True)
 
     dataset_path = "s3://aind-open-data/HCR_681417-Easy-GFP_2023-11-10_13-45-01_fused_2024-01-09_13-16-14/channel_561.zarr"
-    multiscale = "0"
+    multiscale = "2"
     target_size_mb = 2048
     n_workers = 16
-    batch_size = 32
+    batch_size = 1
     prediction_chunksize = (128, 128, 128)
     super_chunksize = None
     logger = create_logger(output_log_path=".")

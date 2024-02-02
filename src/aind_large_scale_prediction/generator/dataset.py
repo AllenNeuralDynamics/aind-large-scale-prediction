@@ -8,10 +8,11 @@ import time
 from functools import partial
 from typing import Callable, List, Optional, Tuple
 
+import dask
 import dask.array as da
 import numpy as np
 import torch
-import torch.multiprocessing as multiprocessing
+import torch.multiprocessing as multp
 import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
@@ -226,7 +227,7 @@ class ZarrSuperChunks(Dataset):
         # Multiprocessing variables
         self.locker = locker
         self.condition = condition
-        self.curr_super_chunk_pos = multiprocessing.Value("i", -1)
+        self.curr_super_chunk_pos = multp.Value("i", -1)
 
         # Initialization of super chunks
         (
@@ -248,13 +249,14 @@ class ZarrSuperChunks(Dataset):
         self.internal_slice_sum = tuple(
             len(internal_slice) for internal_slice in self.internal_slices
         )
-        self.pulled_chunks_per_super_chunk = multiprocessing.Array(
+        self.pulled_chunks_per_super_chunk = multp.Array(
             "i", len(self.internal_slice_sum)
         )
+        self.use_cache = False
 
     def __init_shared_array(
         self, shape: Tuple[int], dtype: type
-    ) -> Tuple[torch.Tensor, multiprocessing.Array]:
+    ) -> Tuple[torch.Tensor, multp.Array]:
         """
         Initializes a shared memory array where
         the super chunks will live one at a time.
@@ -278,7 +280,7 @@ class ZarrSuperChunks(Dataset):
                 Native shared memory object where torch
                 Tensor is pointing to
         """
-        shared_array_base = multiprocessing.Array(
+        shared_array_base = multp.Array(
             typecode_or_type=map_dtype_to_ctype(dtype=dtype, exact=False),
             size_or_initializer=int(np.prod(shape, axis=0)),
             lock=True,
@@ -575,11 +577,11 @@ class ZarrSuperChunks(Dataset):
         worker_info = get_worker_info()
 
         if worker_info is None:
-            # Main worker - No necessity of parallelism
+            # Main worker - No parallelism
             if (
-                self.__check_super_chunk_position(index)
+                self.curr_super_chunk_pos.value == -1
+                or self.__check_super_chunk_position(index)
                 != self.curr_super_chunk_pos.value
-                or self.curr_super_chunk_pos.value == -1
             ):
                 self.curr_super_chunk_pos.value += 1
 
@@ -687,8 +689,8 @@ def measure_data_loader(start_method: str):
     prediction_chunksize = (64, 64, 64)
     target_size_mb = 512
 
-    locker = multiprocessing.Lock() if 2 else None
-    condition = multiprocessing.Condition()
+    locker = multp.Lock() if 2 else None
+    condition = multp.Condition()
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
@@ -709,7 +711,7 @@ def measure_data_loader(start_method: str):
         condition=condition,
     )
     print(f"Multiprocessing times with start method {start_method}:")
-    ctx = multiprocessing.get_context(start_method)
+    ctx = multp.get_context(start_method)
     process = ctx.Process(
         target=helper_measure_dataloader_times, args=(zarr_dataset,)
     )
@@ -730,6 +732,7 @@ def create_data_loader(
     super_chunksize: Optional[Tuple[int, ...]] = None,
     lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
     override_suggested_cpus: Optional[bool] = True,
+    drop_last: Optional[bool] = True,
     logger: Optional[logging.Logger] = None,
 ):
     """
@@ -772,6 +775,9 @@ def create_data_loader(
     override_suggested_cpus: Optional[bool]
         Overrides the suggested number of CPUs used.
         Default: True
+
+    drop_last: Optional[bool]
+        Drops last batch of data
 
     logger: Optional[logging.Logger]
         Logger object to print how the volume is changing
@@ -828,8 +834,8 @@ def create_data_loader(
         collate_fn, prediction_chunksize=prediction_chunksize, device=device
     )
 
-    locker = multiprocessing.Lock() if n_workers else None
-    condition = multiprocessing.Condition()
+    locker = multp.Lock() if n_workers else None
+    condition = multp.Condition()
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
@@ -851,6 +857,7 @@ def create_data_loader(
         persistent_workers=persistent_workers,
         collate_fn=partial_collate,
         multiprocessing_context=multiprocessing_context,
+        drop_last=drop_last,
     )
 
     return zarr_data_loader, zarr_dataset
@@ -869,6 +876,11 @@ def main():
     TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
     dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
     multiscale = "2"
+    pin_memory = True
+    device = None
+
+    suggested_number_cpus = get_suggested_cpu_count()
+
     dataset_reader = ImageReaderFactory().create(
         data_path=dataset_path,
         parse_path=False,
@@ -893,19 +905,27 @@ def main():
     lazy_data = reshape_dataset_to_prediction_chunks(
         lazy_data=lazy_data, prediction_chunksize=prediction_chunksize
     )
-    print(f"New array shape: {lazy_data.shape}")
+    print(f"New array shape: {lazy_data.shape} --")
+
+    multiprocessing_context = None
+    if device is not None:
+        device = torch.device(device)
+        multiprocessing_context = "spawn"
+        print(
+            f"Torch device: {device} and mp context {multiprocessing_context}"
+        )
 
     # Creating partiall collate to provide prediction chunksize
     partial_collate = partial(
-        collate_fn, prediction_chunksize=prediction_chunksize
+        collate_fn, prediction_chunksize=prediction_chunksize, device=device
     )
     super_chunksize = None  # (384, 768, 768)
-    target_size_mb = 512  # None
-    for n_workers in range(0, 4):
-        locker = multiprocessing.Lock() if n_workers else None
-        condition = multiprocessing.Condition()
+    target_size_mb = 1024  # None
+    for n_workers in [5]:  # range(0, suggested_number_cpus):
+        locker = multp.Lock() if n_workers else None
+        condition = multp.Condition()
 
-        for batch_size in [16, 64]:
+        for batch_size in [16]:  # [1, 4, 8, 16]:
             print(
                 f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
             )
@@ -927,18 +947,23 @@ def main():
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=n_workers,
-                pin_memory=True,  # To enable fast data transfers to GPU
+                pin_memory=pin_memory,  # To enable fast data transfers to GPU
                 persistent_workers=persistent_workers,
                 collate_fn=partial_collate,
+                multiprocessing_context=multiprocessing_context,
+                drop_last=True,
             )
 
             print("Starting the loading...")
 
             try:
-                for i, sample in enumerate(zarr_data_loader):
+                idx = 0
+                for sample in zarr_data_loader:
                     print(
-                        f"Batch {i}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()}"
+                        f"{n_workers} Batch {idx}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()}"
                     )
+
+                    idx += 1
 
             except BaseException as e:
                 print(e)
