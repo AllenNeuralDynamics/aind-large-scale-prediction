@@ -89,6 +89,8 @@ class ZarrCustomBatch:
     def __init__(
         self,
         batch_tensor: List[torch.Tensor],
+        batch_super_chunk,
+        batch_internal_slice,
         device: Optional[torch.cuda.Device] = None,
     ):
         """
@@ -102,6 +104,8 @@ class ZarrCustomBatch:
             dataset
         """
         self.batch_tensor = torch.stack(batch_tensor)
+        self.batch_super_chunk = tuple(batch_super_chunk)
+        self.batch_internal_slice = tuple(batch_internal_slice)
 
         if device is not None:
             self.batch_tensor = self.batch_tensor.to(device)
@@ -115,7 +119,10 @@ class ZarrCustomBatch:
 
 
 def collate_fn(
-    batch: List[torch.Tensor],
+    # batch: List[torch.Tensor],
+    # curr_super_chunk_position,
+    # current_internal_slice,
+    return_dataloader,
     prediction_chunksize: Tuple[int, ...],
     device: Optional[torch.cuda.Device] = None,
 ):
@@ -136,10 +143,17 @@ def collate_fn(
     torch.Tensor
         Returns the batch in a tensor format
     """
+
     len_chunks = len(prediction_chunksize)
     # batch_tensor
     batch_tensor = []
-    for batch_item in batch:
+    batch_super_chunk = []
+    batch_internal_slice = []
+    for item in return_dataloader:
+        batch_item = item[0]
+        batch_super_chunk.append(item[1])
+        batch_internal_slice.append(item[2])
+
         if isinstance(batch_item, np.ndarray):
             batch_item = torch.from_numpy(batch_item)
 
@@ -160,7 +174,9 @@ def collate_fn(
 
         batch_tensor.append(batch_item)
 
-    return ZarrCustomBatch(batch_tensor, device)
+    return ZarrCustomBatch(
+        batch_tensor, batch_super_chunk, batch_internal_slice, device
+    )
 
 
 class ZarrSuperChunks(Dataset):
@@ -538,11 +554,14 @@ class ZarrSuperChunks(Dataset):
             )
 
         # Pulling chunk
-        pulled_chunk = self.super_chunk_in_memory[
-            self.internal_slices[self.curr_super_chunk_pos.value][
-                curr_internal_super_chunk_position
-            ]
+        current_internal_slice = self.internal_slices[
+            self.curr_super_chunk_pos.value
+        ][curr_internal_super_chunk_position]
+        curr_super_chunk_position = self.super_chunk_slices[
+            self.curr_super_chunk_pos.value
         ]
+
+        pulled_chunk = self.super_chunk_in_memory[current_internal_slice]
 
         # Updating number of chunks pulled per super chunk
         with self.pulled_chunks_per_super_chunk.get_lock():
@@ -550,7 +569,7 @@ class ZarrSuperChunks(Dataset):
                 self.curr_super_chunk_pos.value
             ] += 1
 
-        return pulled_chunk
+        return pulled_chunk, curr_super_chunk_position, current_internal_slice
 
     def __getitem__(self, index: int) -> torch.Tensor:
         """
@@ -573,6 +592,8 @@ class ZarrSuperChunks(Dataset):
             where slice_size depends on your data
         """
         pulled_prediction_chunk = None
+        current_internal_slice = None
+        curr_super_chunk_position = None
 
         worker_info = get_worker_info()
 
@@ -602,16 +623,28 @@ class ZarrSuperChunks(Dataset):
                 )
 
             # Pulling chunk
+            curr_super_chunk_position = self.super_chunk_slices[
+                self.curr_super_chunk_pos.value
+            ]
+            current_internal_slice = self.internal_slices[
+                self.curr_super_chunk_pos.value
+            ][curr_internal_super_chunk_position]
             pulled_prediction_chunk = self.super_chunk_in_memory[
-                self.internal_slices[self.curr_super_chunk_pos.value][
-                    curr_internal_super_chunk_position
-                ]
+                current_internal_slice
             ]
 
         else:
-            pulled_prediction_chunk = self.__parallel_get_item(index)
+            (
+                pulled_prediction_chunk,
+                curr_super_chunk_position,
+                current_internal_slice,
+            ) = self.__parallel_get_item(index)
 
-        return pulled_prediction_chunk
+        return (
+            pulled_prediction_chunk,
+            curr_super_chunk_position,
+            current_internal_slice,
+        )
 
     def __len__(self) -> int:
         """
@@ -960,7 +993,7 @@ def main():
                 idx = 0
                 for sample in zarr_data_loader:
                     print(
-                        f"{n_workers} Batch {idx}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()}"
+                        f"{n_workers} Batch {idx}: {sample.batch_tensor.shape} - current super chunk: {sample.batch_super_chunk} - current internal slice: {sample.batch_internal_slice} - Pinned?: {sample.batch_tensor.is_pinned()}"
                     )
 
                     idx += 1
