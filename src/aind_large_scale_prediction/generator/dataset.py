@@ -120,7 +120,7 @@ class ZarrCustomBatch:
         self.batch_internal_slice = tuple(batch_internal_slice)
 
         if device is not None:
-            self.batch_tensor = self.batch_tensor.to(device)
+            self.batch_tensor = self.batch_tensor.to(device, non_blocking=True)
 
     def pin_memory(self):
         """
@@ -208,6 +208,7 @@ class ZarrSuperChunks(Dataset):
         target_size_mb: Optional[int] = None,
         locker: Callable[[int], Callable] = None,
         condition: Callable = None,
+        locked_array: Optional[bool] = True,
     ) -> None:
         """
         Initializes the dataset class
@@ -240,6 +241,11 @@ class ZarrSuperChunks(Dataset):
 
         condition: Callable[[int]]
             Condition object from multiprocessing.Condition library
+
+        locked_array: Optional[bool]
+            If we want the shared memory array to be
+            locked for access.
+            Default: True
         """
         super(ZarrSuperChunks, self).__init__()
 
@@ -271,7 +277,9 @@ class ZarrSuperChunks(Dataset):
             self.super_chunk_in_memory,
             self.array_pointer,
         ) = self.__init_shared_array(
-            shape=self.super_chunksize, dtype=self.lazy_data.dtype
+            shape=self.super_chunksize,
+            dtype=self.lazy_data.dtype,
+            locked_array=locked_array,
         )
 
         # Number of slices per super chunk
@@ -283,7 +291,10 @@ class ZarrSuperChunks(Dataset):
         )
 
     def __init_shared_array(
-        self, shape: Tuple[int], dtype: type
+        self,
+        shape: Tuple[int],
+        dtype: type,
+        locked_array: Optional[bool] = True,
     ) -> Tuple[torch.Tensor, multp.Array]:
         """
         Initializes a shared memory array where
@@ -297,6 +308,10 @@ class ZarrSuperChunks(Dataset):
 
         dtype: type
             Array dtype.
+
+        If we want the shared memory array to be
+            locked for access.
+            Default: True
 
         Returns
         -------
@@ -323,9 +338,12 @@ class ZarrSuperChunks(Dataset):
         shared_array_base = multp.Array(
             typecode_or_type=map_dtype_to_ctype(dtype=dtype, exact=False),
             size_or_initializer=int(np.prod(shape, axis=0)),
-            lock=True,
+            lock=locked_array,
         )
-        shared_array = np.ctypeslib.as_array(shared_array_base.get_obj())
+        if locked_array:
+            shared_array_base = shared_array_base.get_obj()
+
+        shared_array = np.ctypeslib.as_array(shared_array_base)
         shared_array = shared_array.reshape(shape)
         shared_array = torch.from_numpy(shared_array)
 
@@ -859,6 +877,7 @@ def create_data_loader(
     lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
     override_suggested_cpus: Optional[bool] = True,
     drop_last: Optional[bool] = True,
+    locked_array: Optional[bool] = True,
     logger: Optional[logging.Logger] = None,
 ):
     """
@@ -904,6 +923,11 @@ def create_data_loader(
 
     drop_last: Optional[bool]
         Drops last batch of data
+
+    locked_array: Optional[bool]
+        If we want the shared memory array to be
+        locked for access.
+        Default: True
 
     logger: Optional[logging.Logger]
         Logger object to print how the volume is changing
@@ -970,6 +994,7 @@ def create_data_loader(
         target_size_mb=target_size_mb,
         locker=locker,
         condition=condition,
+        locked_array=locked_array,
     )
 
     persistent_workers = True if n_workers else False

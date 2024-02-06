@@ -104,6 +104,7 @@ def main():
         pin_memory=pin_memory,
         drop_last=False,
         override_suggested_cpus=False,
+        locked_array=True,
     )
     end_time = time.time()
 
@@ -137,13 +138,13 @@ def main():
             f"Super chunk: {sample.batch_super_chunk} - super chunk slice: {sample.batch_internal_slice}"
         )
 
-        numpy_arr = sample.batch_tensor[0, ...].numpy()
-        logger.info(f"BLock shape: {numpy_arr.shape}")
-        max_z_sample = np.max(numpy_arr, axis=0)
-        vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+        # numpy_arr = sample.batch_tensor[0, ...].numpy()
+        # logger.info(f"BLock shape: {numpy_arr.shape}")
+        # max_z_sample = np.max(numpy_arr, axis=0)
+        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
 
-        plt.imshow(max_z_sample, vmin=vmin, vmax=vmax)
-        plt.show()
+        # plt.imshow(max_z_sample, vmin=vmin, vmax=vmax)
+        # plt.show()
 
     end_time = time.time()
 
