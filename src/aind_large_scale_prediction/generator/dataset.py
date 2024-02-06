@@ -4,6 +4,7 @@ to load the models
 """
 
 import logging
+import os
 import time
 from functools import partial
 from typing import Callable, List, Optional, Tuple
@@ -307,6 +308,18 @@ class ZarrSuperChunks(Dataset):
                 Native shared memory object where torch
                 Tensor is pointing to
         """
+        # shared_array = torch.zeros(
+        #     shape,
+        #     dtype=torch.from_numpy(
+        #         np.array(
+        #             0,
+        #             dtype=dtype
+        #         )
+        #     ).dtype
+        # ).share_memory_()
+
+        # Camilo Laiton's note:
+        # This is faster and has been working reliably for me
         shared_array_base = multp.Array(
             typecode_or_type=map_dtype_to_ctype(dtype=dtype, exact=False),
             size_or_initializer=int(np.prod(shape, axis=0)),
@@ -524,9 +537,13 @@ class ZarrSuperChunks(Dataset):
                     self.curr_super_chunk_pos.value += 1
 
                 # Setting new super chunk in memory
-                self.super_chunk_in_memory = self.lazy_data[
-                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
-                ].compute()
+                self.super_chunk_in_memory[:] = torch.from_numpy(
+                    self.lazy_data[
+                        self.super_chunk_slices[
+                            self.curr_super_chunk_pos.value
+                        ]
+                    ].compute()
+                )
 
                 # Notify sleeping workers
                 with self.condition:
@@ -618,9 +635,13 @@ class ZarrSuperChunks(Dataset):
                 self.curr_super_chunk_pos.value += 1
 
                 # Getting new super chunk
-                self.super_chunk_in_memory = self.lazy_data[
-                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
-                ].compute()
+                self.super_chunk_in_memory[:] = torch.from_numpy(
+                    self.lazy_data[
+                        self.super_chunk_slices[
+                            self.curr_super_chunk_pos.value
+                        ]
+                    ].compute()
+                )
 
             # Mapping current index to internal batch index
             curr_internal_super_chunk_position = self.__map_index(index)
@@ -676,8 +697,8 @@ class ZarrSuperChunks(Dataset):
         Releasing memory pointing variables to NULL
         """
         self.curr_super_chunk_pos = None
-        self.array_pointer = None
         self.super_chunk_in_memory = None
+        self.array_pointer = None
 
 
 def helper_measure_dataloader_times(dataset: ZarrSuperChunks):

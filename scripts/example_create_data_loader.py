@@ -65,8 +65,9 @@ def main():
         pin_memory = False
         multiprocessing.set_start_method("spawn", force=True)
 
-    dataset_path = "s3://aind-open-data/HCR_681417-Easy-GFP_2023-11-10_13-45-01_fused_2024-01-09_13-16-14/channel_561.zarr"
-    # "s3://aind-open-data/SmartSPIM_709392_2024-01-29_18-33-39_stitched_2024-02-04_12-45-58/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
+    dataset_path = "s3://aind-open-data/SmartSPIM_709392_2024-01-29_18-33-39_stitched_2024-02-04_12-45-58/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
+    # "s3://aind-open-data/HCR_681417-Easy-GFP_2023-11-10_13-45-01_fused_2024-01-09_13-16-14/channel_561.zarr"
+    #
 
     multiscale = "3"
     target_size_mb = 512
@@ -119,13 +120,13 @@ def main():
 
     start_time = time.time()
 
-    for idx in range(len(zarr_dataset.super_chunk_slices)):
-        logger.info(
-            f"Super chunk slices: {zarr_dataset.super_chunk_slices[idx]}"
-        )
-        logger.info(
-            f"Internal slices in super chunk: {zarr_dataset.internal_slices[idx]}"
-        )
+    # for idx in range(len(zarr_dataset.super_chunk_slices)):
+    #     logger.info(
+    #         f"Super chunk slices: {zarr_dataset.super_chunk_slices[idx]}"
+    #     )
+    #     logger.info(
+    #         f"Internal slices in super chunk: {zarr_dataset.internal_slices[idx]}"
+    #     )
 
     for i, sample in enumerate(zarr_data_loader):
         logger.info(
@@ -136,13 +137,16 @@ def main():
             f"Super chunk: {sample.batch_super_chunk} - super chunk slice: {sample.batch_internal_slice}"
         )
 
-        # numpy_arr = sample.batch_tensor[0, ...].numpy()
-        # logger.info(f"BLock shape: {numpy_arr.shape}")
-        # max_z_sample = np.max(numpy_arr, axis=0)
-        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+        if i == 10:
+            break
 
-        # plt.imshow(max_z_sample, vmin=vmin, vmax=vmax)
-        # plt.show()
+        numpy_arr = sample.batch_tensor[0, ...].numpy()
+        logger.info(f"BLock shape: {numpy_arr.shape}")
+        max_z_sample = np.max(numpy_arr, axis=0)
+        vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+
+        plt.imshow(max_z_sample, vmin=vmin, vmax=vmax)
+        plt.show()
 
     end_time = time.time()
 
