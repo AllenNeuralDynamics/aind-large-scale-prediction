@@ -511,6 +511,52 @@ class ZarrSuperChunks(Dataset):
 
         return False
 
+    def __get_new_super_chunk(self, future_super_chunk_shape: Tuple[slice]):
+        """
+        Gets a new super chunk from cloud/local storage.
+        This method is internal and should only be used
+        inside of a locker so only one process pulls
+        data from the cloud.
+
+        Parameters
+        ----------
+        future_super_chunk_shape: Tuple[slice]
+            Future super chunk shape, useful to check
+            so arrays match in size.
+
+        """
+        if self.super_chunk_in_memory.shape != future_super_chunk_shape:
+            pad_width = tuple(
+                (
+                    0,
+                    int(
+                        self.super_chunk_in_memory.shape[idx]
+                        - future_super_chunk_shape[idx]
+                    ),  # padding the right and bottom of the volume only
+                )
+                for idx in range(len(future_super_chunk_shape))
+            )
+
+            padded_lazy_data = da.pad(
+                array=self.lazy_data[
+                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
+                ],
+                pad_width=pad_width,
+                mode="constant",
+                constant_values=0,
+            )
+
+            self.super_chunk_in_memory[:] = torch.from_numpy(
+                padded_lazy_data.compute()
+            )
+
+        else:
+            self.super_chunk_in_memory[:] = torch.from_numpy(
+                self.lazy_data[
+                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
+                ].compute()
+            )
+
     def __parallel_get_item(self, index: int) -> torch.Tensor:
         """
         Method to retrieve the current chunk in the
@@ -537,12 +583,20 @@ class ZarrSuperChunks(Dataset):
                     self.curr_super_chunk_pos.value += 1
 
                 # Setting new super chunk in memory
-                self.super_chunk_in_memory[:] = torch.from_numpy(
-                    self.lazy_data[
-                        self.super_chunk_slices[
-                            self.curr_super_chunk_pos.value
-                        ]
-                    ].compute()
+                future_super_chunk_shape = self.super_chunk_slices[
+                    self.curr_super_chunk_pos.value
+                ]
+
+                future_super_chunk_shape = tuple(
+                    [
+                        axis_shape.stop - axis_shape.start
+                        for axis_shape in future_super_chunk_shape
+                    ]
+                )
+
+                # Pulls the new super chunk
+                self.__get_new_super_chunk(
+                    future_super_chunk_shape=future_super_chunk_shape
                 )
 
                 # Notify sleeping workers
@@ -634,13 +688,20 @@ class ZarrSuperChunks(Dataset):
             ):
                 self.curr_super_chunk_pos.value += 1
 
+                future_super_chunk_shape = self.super_chunk_slices[
+                    self.curr_super_chunk_pos.value
+                ]
+
+                future_super_chunk_shape = tuple(
+                    [
+                        axis_shape.stop - axis_shape.start
+                        for axis_shape in future_super_chunk_shape
+                    ]
+                )
+
                 # Getting new super chunk
-                self.super_chunk_in_memory[:] = torch.from_numpy(
-                    self.lazy_data[
-                        self.super_chunk_slices[
-                            self.curr_super_chunk_pos.value
-                        ]
-                    ].compute()
+                self.__get_new_super_chunk(
+                    future_super_chunk_shape=future_super_chunk_shape
                 )
 
             # Mapping current index to internal batch index
@@ -986,6 +1047,7 @@ def main():
     )
     super_chunksize = None  # (384, 768, 768)
     target_size_mb = 1024  # None
+
     for n_workers in [10]:  # range(0, suggested_number_cpus):
         locker = multp.Lock() if n_workers else None
         condition = multp.Condition()
@@ -994,6 +1056,7 @@ def main():
             print(
                 f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
             )
+
             start_time = time.time()
             zarr_dataset = ZarrSuperChunks(
                 lazy_data=lazy_data,

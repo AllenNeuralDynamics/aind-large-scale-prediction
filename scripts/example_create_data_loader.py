@@ -71,7 +71,7 @@ def main():
 
     multiscale = "3"
     target_size_mb = 512
-    n_workers = 10
+    n_workers = 0
     batch_size = 1
     prediction_chunksize = (128, 128, 128)
     super_chunksize = None
@@ -136,9 +136,6 @@ def main():
         logger.info(
             f"Super chunk: {sample.batch_super_chunk} - super chunk slice: {sample.batch_internal_slice}"
         )
-
-        if i == 10:
-            break
 
         numpy_arr = sample.batch_tensor[0, ...].numpy()
         logger.info(f"BLock shape: {numpy_arr.shape}")
