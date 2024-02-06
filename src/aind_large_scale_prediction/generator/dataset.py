@@ -89,8 +89,8 @@ class ZarrCustomBatch:
     def __init__(
         self,
         batch_tensor: List[torch.Tensor],
-        batch_super_chunk,
-        batch_internal_slice,
+        batch_super_chunk: List[Tuple[int]],
+        batch_internal_slice: List[Tuple[int]],
         device: Optional[torch.cuda.Device] = None,
     ):
         """
@@ -98,10 +98,21 @@ class ZarrCustomBatch:
 
         Parameters
         ----------
-        chunk_block: torch.Tensor
-            Chunksize block based on the prediction
-            chunksize declared on the ZarrSuperChunks
-            dataset
+        batch_tensor: List[torch.Tensor]
+            Batched image data given by the
+            data loader.
+
+        batch_super_chunk: List[Tuple[int]]
+            Slices for the current super chunk
+
+        batch_internal_slice: List[Tuple[int]]
+            Slices for the internal slices within
+            the pulled super chunk
+
+        device: Optional[torch.cuda.Device]
+            Device where the data will be placed.
+            Default: None
+
         """
         self.batch_tensor = torch.stack(batch_tensor)
         self.batch_super_chunk = tuple(batch_super_chunk)
@@ -119,10 +130,7 @@ class ZarrCustomBatch:
 
 
 def collate_fn(
-    # batch: List[torch.Tensor],
-    # curr_super_chunk_position,
-    # current_internal_slice,
-    return_dataloader,
+    dataloader_return: Tuple,
     prediction_chunksize: Tuple[int, ...],
     device: Optional[torch.cuda.Device] = None,
 ):
@@ -131,9 +139,10 @@ def collate_fn(
 
     Parameters
     ----------
-    batch: List[torch.Tensor]
-        List of pulled torch tensors from
-        the super chunk.
+    dataloader_return: Tuple
+        Tuple with the array data,
+        super chunk positions and current internal
+        slices for the batched data.
 
     prediction_chunksize: Tuple[int, ...]
         Ideally, all the chunks must have this
@@ -149,7 +158,7 @@ def collate_fn(
     batch_tensor = []
     batch_super_chunk = []
     batch_internal_slice = []
-    for item in return_dataloader:
+    for item in dataloader_return:
         batch_item = item[0]
         batch_super_chunk.append(item[1])
         batch_internal_slice.append(item[2])
@@ -175,7 +184,10 @@ def collate_fn(
         batch_tensor.append(batch_item)
 
     return ZarrCustomBatch(
-        batch_tensor, batch_super_chunk, batch_internal_slice, device
+        batch_tensor=batch_tensor,
+        batch_super_chunk=batch_super_chunk,
+        batch_internal_slice=batch_internal_slice,
+        device=device,
     )
 
 
@@ -268,7 +280,6 @@ class ZarrSuperChunks(Dataset):
         self.pulled_chunks_per_super_chunk = multp.Array(
             "i", len(self.internal_slice_sum)
         )
-        self.use_cache = False
 
     def __init_shared_array(
         self, shape: Tuple[int], dtype: type
@@ -908,7 +919,7 @@ def main():
     IMAGE_PATH = "diSPIM_685890_2023-06-29_14-39-56/diSPIM.zarr"
     TILE_NAME = "647_D1_X_0001_Y_0001_Z_0000_ch_488.zarr"
     dataset_path = f"s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}"
-    multiscale = "2"
+    multiscale = "3"
     pin_memory = True
     device = None
 
@@ -954,11 +965,11 @@ def main():
     )
     super_chunksize = None  # (384, 768, 768)
     target_size_mb = 1024  # None
-    for n_workers in [5]:  # range(0, suggested_number_cpus):
+    for n_workers in [10]:  # range(0, suggested_number_cpus):
         locker = multp.Lock() if n_workers else None
         condition = multp.Condition()
 
-        for batch_size in [16]:  # [1, 4, 8, 16]:
+        for batch_size in [1]:  # [1, 4, 8, 16]:
             print(
                 f"{20*'='} Test Workers {n_workers} Batch Size {batch_size} {20*'='}"
             )
