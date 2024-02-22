@@ -1,3 +1,7 @@
+"""
+Generates slices script example
+"""
+
 from aind_large_scale_prediction.generator.zarr_slice_generator import (
     BlockedZarrArrayIterator,
 )
@@ -51,16 +55,23 @@ def main():
 
     list_super_chunks = list(
         zarr_iterator.gen_slices(
-            arr_shape=dataset_lazy_data.shape, block_shape=super_chunks_size
+            arr_shape=dataset_lazy_data.shape,
+            block_shape=super_chunks_size,
         )
     )
+    overlap_shape = [10, 10, 10]
     prediction_chunksize = dataset_lazy_data.chunksize  # (64, 128, 128)
+
+    print(
+        f"Prediction chunksize: {prediction_chunksize} - Overlap shape: {overlap_shape}"
+    )
 
     return (
         dataset_lazy_data,
         list_super_chunks,
-        prediction_chunksize,
+        tuple(prediction_chunksize),
         zarr_iterator,
+        tuple(overlap_shape),
     )
 
     # generators = []
@@ -80,8 +91,15 @@ def main():
 
 
 def eval_loading_super_chunk(
-    dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator
+    dataset_lazy_data,
+    list_super_chunks,
+    prediction_chunksize,
+    zarr_iterator,
+    overlap_shape,
 ):
+    """
+    Evaluates the performance of the super chunk loader
+    """
     super_chunk = list_super_chunks[0]
     print(f"Total n blocks: {dataset_lazy_data[super_chunk].blocks.size}")
     data_in_memory = dataset_lazy_data[super_chunk].compute()
@@ -89,10 +107,11 @@ def eval_loading_super_chunk(
         zarr_iterator.gen_slices(
             arr_shape=data_in_memory.shape,
             block_shape=prediction_chunksize,
+            overlap_shape=overlap_shape,
         )
     ):
         print(
-            f"[{i}] - Shape for super chunk: {dataset_lazy_data[super_chunk].shape} - {data_in_memory.shape} slice ofdata in memory: {data_in_memory[zarr_iter_slice].shape}"
+            f"[{i}] - Shape for super chunk: {dataset_lazy_data[super_chunk].shape} - {data_in_memory.shape} slice of data in memory: {data_in_memory[zarr_iter_slice].shape} - slice: {zarr_iter_slice}"
         )
 
 
@@ -127,9 +146,10 @@ if __name__ == "__main__":
         list_super_chunks,
         prediction_chunksize,
         zarr_iterator,
+        overlap_shape,
     ) = main()
     cProfile.run(
-        "eval_loading_super_chunk(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator)",
+        "eval_loading_super_chunk(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator, overlap_shape)",
         filename="super_chunk.dat",
     )
     # cProfile.run('eval_loading_chunks_directly(dataset_lazy_data, list_super_chunks, prediction_chunksize, zarr_iterator)', filename="chunks_directly.dat")
