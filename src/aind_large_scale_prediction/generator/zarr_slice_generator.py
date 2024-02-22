@@ -229,6 +229,11 @@ class BlockedZarrArrayIterator:
         if overlap_shape is None:
             overlap_shape = [0] * len(arr_shape)
 
+        if sum(overlap_shape) >= sum(block_shape):
+            raise ValueError(
+                f"Overlap shape {overlap_shape} must be smaller than block shape: {block_shape}"
+            )
+
         if len(arr_shape) != len(block_shape) or len(arr_shape) != len(
             start_shape
         ):

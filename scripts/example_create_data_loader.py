@@ -71,9 +71,10 @@ def main():
 
     multiscale = "3"
     target_size_mb = 512
-    n_workers = 0
+    n_workers = 10
     batch_size = 1
     prediction_chunksize = (128, 128, 128)
+    overlap_prediction_chunksize = (10, 10, 10)  # (30, 30, 30)
     super_chunksize = None
     logger = create_logger(output_log_path=".")
 
@@ -94,6 +95,7 @@ def main():
         multiscale=multiscale,
         target_size_mb=target_size_mb,
         prediction_chunksize=prediction_chunksize,
+        overlap_prediction_chunksize=overlap_prediction_chunksize,
         n_workers=n_workers,
         batch_size=batch_size,
         dtype=np.float32,  # Allowed data type to process with pytorch cuda
