@@ -74,7 +74,7 @@ def main():
     n_workers = 10
     batch_size = 1
     prediction_chunksize = (128, 128, 128)
-    overlap_prediction_chunksize = (10, 10, 10)  # (30, 30, 30)
+    overlap_prediction_chunksize = (30, 30, 30)
     super_chunksize = None
     logger = create_logger(output_log_path=".")
 

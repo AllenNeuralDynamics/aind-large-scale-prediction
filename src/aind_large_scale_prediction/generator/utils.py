@@ -225,3 +225,58 @@ def find_position_in_total_sum(number: int, numbers_list: List[int]) -> int:
             position = idx
             break
     return position
+
+
+def estimate_output_volume(
+    image_shape: Tuple[int],
+    chunk_shape: Tuple[int],
+    overlap_per_axis: Tuple[int],
+) -> Tuple[int]:
+    """
+    Estimates output volume based on the overlap region.
+
+    Parameters
+    ----------
+    image_shape: Tuple[int]
+        Original image shape
+
+    chunk_shape: Tuple[int]
+        Chunk shape
+
+    overlap_per_axis: Tuple[int]
+        Overlap per axis between chunks.
+
+    Returns
+    -------
+    Tuple[int]
+        Output volume considering that each subchunk
+        will be resized to chunk_shape + overlap_per_axis
+        depending in which block we're dealing with.
+    """
+    len_image_shape = len(image_shape)
+
+    if len_image_shape != len(chunk_shape) or len(chunk_shape) != len(
+        overlap_per_axis
+    ):
+        raise ValueError(
+            "Please, verify the parameters for the output volume function"
+        )
+
+    iter_positions = range(0, len(image_shape))
+
+    res = []
+    for dim in iter_positions:
+        check = []
+        ceiled_dim = np.ceil(image_shape[dim] / chunk_shape[dim])
+        for pos in range(0, int(ceiled_dim)):
+            overlap_sum = 1
+            if pos > 0 and pos < ceiled_dim - 1:
+                overlap_sum = 2
+
+            check.append(
+                chunk_shape[dim] + (overlap_sum * overlap_per_axis[dim])
+            )
+
+        res.append(sum(check))
+
+    return tuple(res)
