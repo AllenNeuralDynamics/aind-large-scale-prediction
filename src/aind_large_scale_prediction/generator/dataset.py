@@ -132,7 +132,6 @@ class ZarrCustomBatch:
 
 def collate_fn(
     dataloader_return: Tuple,
-    prediction_chunksize: Tuple[int, ...],
     device: Optional[torch.cuda.Device] = None,
 ):
     """
@@ -145,16 +144,13 @@ def collate_fn(
         super chunk positions and current internal
         slices for the batched data.
 
-    prediction_chunksize: Tuple[int, ...]
-        Ideally, all the chunks must have this
-        shape. If not, we pad it.
-
     Returns:
     torch.Tensor
         Returns the batch in a tensor format
     """
 
-    len_chunks = len(prediction_chunksize)
+    len_chunks = len(dataloader_return[0][2])
+
     # batch_tensor
     batch_tensor = []
     batch_super_chunk = []
@@ -163,6 +159,10 @@ def collate_fn(
         batch_item = item[0]
         batch_super_chunk.append(item[1])
         batch_internal_slice.append(item[2])
+
+        prediction_chunksize = tuple(
+            [slice_obj.stop - slice_obj.start for slice_obj in item[2]]
+        )
 
         if isinstance(batch_item, np.ndarray):
             batch_item = torch.from_numpy(batch_item)
@@ -204,6 +204,7 @@ class ZarrSuperChunks(Dataset):
         self,
         lazy_data: ArrayLike,
         prediction_chunksize: Tuple[int, int, int],
+        overlap_prediction_chunksize: Tuple[int, int, int] = None,
         super_chunksize: Optional[Tuple[int, int, int]] = None,
         target_size_mb: Optional[int] = None,
         locker: Callable[[int], Callable] = None,
@@ -223,6 +224,10 @@ class ZarrSuperChunks(Dataset):
             and an estimated/provided super chunk size,
             we will take a prediction chunk size from
             the super chunk that is already in memory.
+
+        overlap_prediction_chunksize: Tuple[int, int, int]
+            Overlap between prediction chunks.
+            Default: None
 
         super_chunksize: Tuple[int, int, int]
             Given a lazy array (not loaded in memory),
@@ -257,6 +262,7 @@ class ZarrSuperChunks(Dataset):
         self.lazy_data = extract_data(lazy_data)
         self.super_chunksize = super_chunksize
         self.prediction_chunksize = prediction_chunksize
+        self.overlap_prediction_chunksize = overlap_prediction_chunksize
         self.target_size_mb = target_size_mb
 
         # Multiprocessing variables
@@ -419,8 +425,11 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator.gen_slices(
                 arr_shape=self.lazy_data.shape,
                 block_shape=new_super_chunksize,
+                overlap_shape=self.overlap_prediction_chunksize,
+                # TODO overlap region between loaded super chunks
             )
         )
+        print("Super chunk slices: ", super_chunk_slices)
 
         # Generating internal slices per generated super chunk
         internal_slices = tuple(
@@ -428,10 +437,20 @@ class ZarrSuperChunks(Dataset):
                 zarr_iterator.gen_slices(
                     arr_shape=self.lazy_data[super_chunk_slice].shape,
                     block_shape=self.prediction_chunksize,
+                    overlap_shape=self.overlap_prediction_chunksize,
                 )
             )
             for super_chunk_slice in super_chunk_slices
         )
+
+        np_overlap = np.array(self.overlap_prediction_chunksize)
+        if np.any(np_overlap):
+            new_super_chunksize = tuple(
+                np.array(new_super_chunksize) + np_overlap
+            )
+            print(
+                f"Adding overlap area to super chunk size: {new_super_chunksize}"
+            )
 
         return (
             new_super_chunksize,
@@ -543,6 +562,12 @@ class ZarrSuperChunks(Dataset):
             so arrays match in size.
 
         """
+        print(
+            "Super chunk in memory: ",
+            self.super_chunk_in_memory.shape,
+            " - Future shape: ",
+            future_super_chunk_shape,
+        )
         if self.super_chunk_in_memory.shape != future_super_chunk_shape:
             pad_width = tuple(
                 (
@@ -878,6 +903,7 @@ def create_data_loader(
     override_suggested_cpus: Optional[bool] = True,
     drop_last: Optional[bool] = True,
     locked_array: Optional[bool] = True,
+    overlap_prediction_chunksize: Tuple[int, ...] = None,
     logger: Optional[logging.Logger] = None,
 ):
     """
@@ -981,7 +1007,8 @@ def create_data_loader(
         )
 
     partial_collate = partial(
-        collate_fn, prediction_chunksize=prediction_chunksize, device=device
+        collate_fn,
+        device=device,
     )
 
     locker = multp.Lock() if n_workers else None
@@ -990,6 +1017,7 @@ def create_data_loader(
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
         prediction_chunksize=prediction_chunksize,
+        overlap_prediction_chunksize=overlap_prediction_chunksize,
         super_chunksize=super_chunksize,
         target_size_mb=target_size_mb,
         locker=locker,

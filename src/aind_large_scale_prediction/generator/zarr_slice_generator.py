@@ -184,6 +184,7 @@ class BlockedZarrArrayIterator:
         block_shape: Tuple[int, ...],
         dimension: Optional[int] = 0,
         start_shape: Optional[List[int]] = None,
+        overlap_shape: Optional[List[int]] = None,
     ) -> Generator:
         """
         Generate a series of slices that can be used to traverse an array in
@@ -205,6 +206,17 @@ class BlockedZarrArrayIterator:
             If the array shape is not divisible by the block shape along a dimension,
             the last slice along that dimension is truncated.
 
+        dimension: Optional[int]
+            First slicing dimension
+            Default = 0
+
+        start_shape: Optional[List[Int]]
+            Start shape in the zarr volume.
+            Default: None
+
+        overlap_shape: Optional[List[int]]
+            Overlap shape between chunks
+
         Returns
         -------
         generator of tuple of slice
@@ -213,6 +225,14 @@ class BlockedZarrArrayIterator:
         """
         if start_shape is None:
             start_shape = [0] * len(arr_shape)
+
+        if overlap_shape is None:
+            overlap_shape = [0] * len(arr_shape)
+
+        if sum(overlap_shape) >= sum(block_shape):
+            raise ValueError(
+                f"Overlap shape {overlap_shape} must be smaller than block shape: {block_shape}"
+            )
 
         if len(arr_shape) != len(block_shape) or len(arr_shape) != len(
             start_shape
@@ -235,11 +255,17 @@ class BlockedZarrArrayIterator:
                 for i in range(
                     start_shape[dim], arr_shape[dim], block_shape[dim]
                 ):
+                    # Calculate the start index for this block
+                    start_i = max(i, 0)
+
                     # Calculate the end index for this block
-                    end_i = min(i + block_shape[dim], arr_shape[dim])
+                    end_i = min(
+                        i + block_shape[dim] + overlap_shape[dim],
+                        arr_shape[dim],
+                    )
                     # Generate slices for the remaining dimensions
                     for rest in _slice_along_dim(dim + 1):
-                        yield (slice(i, end_i),) + rest
+                        yield (slice(start_i, end_i),) + rest
 
         # Start slicing along the first dimension
         return _slice_along_dim(dim=dimension)

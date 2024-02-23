@@ -11,9 +11,15 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
+import zarr
 
 from aind_large_scale_prediction.generator.dataset import create_data_loader
-from aind_large_scale_prediction.generator.utils import get_suggested_cpu_count
+from aind_large_scale_prediction.generator.utils import (
+    estimate_output_volume,
+    get_chunk_number,
+    get_suggested_cpu_count,
+    recover_global_position,
+)
 
 
 def create_logger(output_log_path: str) -> logging.Logger:
@@ -42,7 +48,7 @@ def create_logger(output_log_path: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(LOGS_FILE, "a"),
+            logging.FileHandler(LOGS_FILE, "w"),
         ],
         force=True,
     )
@@ -70,10 +76,11 @@ def main():
     #
 
     multiscale = "3"
-    target_size_mb = 512
-    n_workers = 0
+    target_size_mb = 256
+    n_workers = 10
     batch_size = 1
-    prediction_chunksize = (128, 128, 128)
+    prediction_chunksize = (64, 64, 64)
+    overlap_prediction_chunksize = (0, 0, 0)  # (30, 30, 30)
     super_chunksize = None
     logger = create_logger(output_log_path=".")
 
@@ -94,6 +101,7 @@ def main():
         multiscale=multiscale,
         target_size_mb=target_size_mb,
         prediction_chunksize=prediction_chunksize,
+        overlap_prediction_chunksize=overlap_prediction_chunksize,
         n_workers=n_workers,
         batch_size=batch_size,
         dtype=np.float32,  # Allowed data type to process with pytorch cuda
@@ -108,6 +116,33 @@ def main():
     )
     end_time = time.time()
 
+    print(f"Array shape: {zarr_dataset.lazy_data.shape}")
+    print(f"Prediction chunksize: {prediction_chunksize}")
+
+    output_volume_shape = estimate_output_volume(
+        image_shape=zarr_dataset.lazy_data.shape,
+        chunk_shape=prediction_chunksize,
+        overlap_per_axis=overlap_prediction_chunksize,
+    )
+
+    prediction_chunksize_overlap = np.array(prediction_chunksize) + np.array(
+        overlap_prediction_chunksize
+    )
+
+    output_zarr_path = "./test_dataset.zarr"
+    output_zarr = zarr.open(
+        output_zarr_path,
+        "w",
+        shape=output_volume_shape,
+        chunks=prediction_chunksize_overlap,
+        dtype=np.uint16,
+    )
+    logger.info(f"Rechunking zarr in path: {output_zarr_path}")
+
+    logger.info(
+        f"Initial shape: {zarr_dataset.lazy_data.shape} - Estimated output volume shape: {output_volume_shape}"
+    )
+
     logger.info(f"Time creating data loader: {end_time - start_time}")
 
     total_batches = np.prod(zarr_dataset.lazy_data.shape) / (
@@ -121,22 +156,65 @@ def main():
 
     start_time = time.time()
 
-    # for idx in range(len(zarr_dataset.super_chunk_slices)):
-    #     logger.info(
-    #         f"Super chunk slices: {zarr_dataset.super_chunk_slices[idx]}"
-    #     )
-    #     logger.info(
-    #         f"Internal slices in super chunk: {zarr_dataset.internal_slices[idx]}"
-    #     )
-
     for i, sample in enumerate(zarr_data_loader):
-        logger.info(
-            f"Batch {i}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()} - dtype: {sample.batch_tensor.dtype} - device: {sample.batch_tensor.device}"
+        # logger.info(
+        #     f"Batch {i}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()} - dtype: {sample.batch_tensor.dtype} - device: {sample.batch_tensor.device}"
+        # )
+
+        shape = [batch_size]
+        for ix in range(0, 3):
+            shape.append(
+                sample.batch_internal_slice[0][ix].stop
+                - sample.batch_internal_slice[0][ix].start
+            )
+
+        if sum(shape) != sum(sample.batch_tensor.shape):
+            raise ValueError(
+                f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
+            )
+
+        global_coord_pos = recover_global_position(
+            image_shape=output_volume_shape,
+            super_chunk_slice=sample.batch_super_chunk[0],
+            internal_slice=sample.batch_internal_slice[0],
+            overlap_prediction_chunksize=overlap_prediction_chunksize,
         )
 
-        logger.info(
-            f"Super chunk: {sample.batch_super_chunk} - super chunk slice: {sample.batch_internal_slice}"
+        # Chunk number from original dataset without overlap
+        # The overlap happens from current left chunk to right/bottom/depth chunk
+        chunk_axis_number = get_chunk_number(
+            image_shape=zarr_dataset.lazy_data.shape,
+            zyx_pos=(
+                global_coord_pos[0].start,
+                global_coord_pos[1].start,
+                global_coord_pos[2].start,
+            ),
+            chunk_size_zyx=prediction_chunksize,
         )
+
+        destination_position_start = (prediction_chunksize_overlap) * np.array(
+            chunk_axis_number
+        )
+        destination_position_end = destination_position_start + np.array(
+            sample.batch_tensor.shape[-3:]
+        )
+
+        destination_position = []
+        for ix in range(0, len(destination_position_end)):
+            destination_position.append(
+                slice(
+                    destination_position_start[ix],
+                    destination_position_end[ix],
+                )
+            )
+
+        destination_position = tuple(destination_position)
+
+        logger.info(
+            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global pos: {global_coord_pos} - dest chunk: {chunk_axis_number} - dest pos: {destination_position}"
+        )
+
+        output_zarr[destination_position] = sample.batch_tensor[0, ...].numpy()
 
         # numpy_arr = sample.batch_tensor[0, ...].numpy()
         # logger.info(f"BLock shape: {numpy_arr.shape}")
