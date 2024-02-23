@@ -310,9 +310,6 @@ def get_chunk_number(
     chunk_number_x = int(np.floor(zyx_pos[2] / chunk_size_zyx[2]))
 
     chunk_zyx = (chunk_number_z, chunk_number_y, chunk_number_x)
-    print(
-        f"Orig position: {orig_pos} - zxy_pos: {zyx_pos} - chunkpos: {chunk_zyx}"
-    )
 
     return chunk_zyx
 
