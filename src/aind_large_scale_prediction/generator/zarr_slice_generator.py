@@ -256,7 +256,7 @@ class BlockedZarrArrayIterator:
                     start_shape[dim], arr_shape[dim], block_shape[dim]
                 ):
                     # Calculate the start index for this block
-                    start_i = max(i - overlap_shape[dim], 0)
+                    start_i = max(i, 0)
 
                     # Calculate the end index for this block
                     end_i = min(
