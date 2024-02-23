@@ -562,12 +562,6 @@ class ZarrSuperChunks(Dataset):
             so arrays match in size.
 
         """
-        print(
-            "Super chunk in memory: ",
-            self.super_chunk_in_memory.shape,
-            " - Future shape: ",
-            future_super_chunk_shape,
-        )
         if self.super_chunk_in_memory.shape != future_super_chunk_shape:
             pad_width = tuple(
                 (
