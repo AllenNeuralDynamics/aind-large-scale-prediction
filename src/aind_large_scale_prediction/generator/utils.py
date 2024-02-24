@@ -277,10 +277,10 @@ def estimate_output_volume(
     return tuple(res)
 
 
-def get_chunk_number(
+def get_chunk_numbers(
     image_shape: Tuple[int],
-    zyx_pos: Tuple[int],
-    chunk_size_zyx: Tuple[int],
+    nd_positions: List[Tuple[int]],
+    nd_chunk_size: Tuple[int],
 ) -> Tuple[int]:
     """
     Get chunk number in each axis
@@ -290,28 +290,32 @@ def get_chunk_number(
     image_shape: Tuple[int]
         Image shape
 
-    zyx_pos: Tuple[int]
-        ZYX position to get the chunknumber
+    nd_positions: List[Tuple[int]]
+        Positions to get the chunknumber
 
-    chunk_size_zyx: Tuple[int]
-        Chunk size in ZYX direction
+    nd_chunk_size: Tuple[int]
+        Chunk size in the same order as positions.
+        E.g., nd_positions = [[Z,Y,X]] then
+        nd_chunk_size = [[Z,Y,X]]
 
     Returns
     -------
     Tuple[int]
         Tuple with the location of the chunk
     """
-    orig_pos = np.array(zyx_pos).copy()
-    zyx_pos = np.array(zyx_pos)
-    zyx_pos = np.clip(zyx_pos, 1, np.array(image_shape) - 1, out=zyx_pos)
+    nd_positions = np.array(nd_positions)
+    nd_positions = np.clip(
+        nd_positions, 1, np.array(image_shape) - 1, out=nd_positions
+    )
+    nd_positions = nd_positions.transpose()
 
-    chunk_number_z = int(np.floor(zyx_pos[0] / chunk_size_zyx[0]))
-    chunk_number_y = int(np.floor(zyx_pos[1] / chunk_size_zyx[1]))
-    chunk_number_x = int(np.floor(zyx_pos[2] / chunk_size_zyx[2]))
+    for axis in range(nd_positions.shape[0]):
+        nd_positions[axis, :] = np.floor(
+            nd_positions[axis, :] / nd_chunk_size[axis]
+        ).astype(np.uint32)
 
-    chunk_zyx = (chunk_number_z, chunk_number_y, chunk_number_x)
-
-    return chunk_zyx
+    nd_positions = nd_positions.transpose()
+    return nd_positions
 
 
 def get_chunk_start_position(
@@ -341,7 +345,7 @@ def get_chunk_start_position(
         position in the image space
     """
 
-    axis_chunk_number = get_chunk_number(
+    axis_chunk_number = get_chunk_numbers(
         image_shape=image_shape,
         zyx_pos=dest_zyx,
         chunk_size_zyx=chunk_size_zyx,
@@ -359,59 +363,110 @@ def get_chunk_start_position(
 
 
 def recover_global_position(
-    image_shape: Tuple[int],
-    super_chunk_slice: Tuple[int],
-    internal_slice: Tuple[int],
-    overlap_prediction_chunksize: Tuple[int],
+    super_chunk_slice: Tuple[int], internal_slices: List[Tuple[int]]
 ) -> Tuple[int]:
     """
     Recovers global coordinate position based on
     a local coordinate position in a super chunk.
-
-    This method is for a single slice.
-    # TODO scale to batches
 
     Parameters
     ----------
     super_chunk_slice: Tuple[int]
         Super chunk slices
 
-    internal_slice: Tuple[int]
+    internal_slices: List[Tuple[int]]
         Internal slices in super chunks
 
     Returns
     -------
-    Tuple[int]
+    Tuple[Tuple[int]]
         Global coordinate position of a
-        internal slice of a super chunk
+        internal slice of a super chunk.
+        The tuple contains both start and
+        end positions, start positions only
+        and end only positions.
     """
 
-    zyx_super_chunk_start = []
-    zyx_internal_slice_start = []
-    zyx_internal_slice_end = []
-
-    len_internal_slices = len(internal_slice)
-    for idx in range(len_internal_slices):
-        zyx_super_chunk_start.append(super_chunk_slice[idx].start)
-        zyx_internal_slice_start.append(internal_slice[idx].start)
-
-        zyx_internal_slice_end.append(
-            internal_slice[idx].stop - internal_slice[idx].start
-        )
-
-    zyx_global_slice_start = np.array(zyx_super_chunk_start) + np.array(
-        zyx_internal_slice_start
-    )
-    zyx_global_slice_end = zyx_global_slice_start + np.array(
-        zyx_internal_slice_end
-    )
-
+    len_internal_slices = len(internal_slices[0])
+    # Getting internal slices
     zyx_global_slices = []
-    # Rearrange to slices
-    for idx in range(len(internal_slice)):
+    zyx_global_slices_start = []
+    zyx_global_slices_end = []
 
-        zyx_global_slices.append(
-            slice(zyx_global_slice_start[idx], zyx_global_slice_end[idx])
-        )
+    for internal_slice in internal_slices:
 
-    return tuple(zyx_global_slices)
+        zyx_internal_slice_start = []
+        zyx_internal_slice_end = []
+        zyx_internal_slice = []
+
+        for idx in range(len_internal_slices):
+            start = internal_slice[idx].start + super_chunk_slice[idx].start
+            stop = internal_slice[idx].stop - internal_slice[idx].start
+            zyx_internal_slice.append(
+                slice(
+                    start,
+                    stop
+                )
+            ) 
+            zyx_internal_slice_start.append(start)
+            zyx_internal_slice_end.append(stop)
+
+        zyx_global_slices_start.append(tuple(zyx_internal_slice_start))
+        zyx_global_slices_end.append(tuple(zyx_internal_slice_end))
+        zyx_global_slices.append(tuple(zyx_internal_slice))
+
+    return tuple(zyx_internal_slice), tuple(zyx_global_slices_start), tuple(zyx_global_slices_end)
+
+
+def get_output_coordinate_overlap(
+    chunk_axis_numbers: np.array,
+    prediction_chunksize_overlap: np.array,
+    batch_img_tensor_shape: Tuple[int]
+):
+    """
+    Get output coordinate when we are iterating
+    the zarr dataset in overlaped chunks.
+
+    Parameters
+    ----------
+    chunk_axis_numbers: np.array
+        All the chunk positions for the
+        current bach of data.
+
+    prediction_chunksize_overlap: np.array
+        Overlap between contiguous chunks.
+    
+    batch_img_tensor_shape: Tuple[int]
+        Shape of the images excluding the
+        batch number
+
+    Returns
+    -------
+    Tuple[int]
+        Destination coordinate where the data
+        will be written.
+    """
+
+    n_dims = len(chunk_axis_numbers)
+    if n_dims < len(batch_img_tensor_shape):
+        batch_img_tensor_shape = batch_img_tensor_shape[-n_dims:]
+
+    dest_pos_start = chunk_axis_numbers * prediction_chunksize_overlap
+    dest_pos_end = dest_pos_start + np.array(
+        batch_img_tensor_shape
+    )
+
+    dest_pos_slices = []
+    for position in range(0, dest_pos_start.shape[0]):
+        curr_pos = []
+        for ix in range(0, dest_pos_start.shape[-1]):
+            curr_pos.append(
+                slice(
+                    dest_pos_start[position][ix],
+                    dest_pos_end[position][ix],
+                )
+            )
+
+        dest_pos_slices.append(tuple(curr_pos))
+
+    return tuple(dest_pos_slices)

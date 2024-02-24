@@ -16,7 +16,8 @@ import zarr
 from aind_large_scale_prediction.generator.dataset import create_data_loader
 from aind_large_scale_prediction.generator.utils import (
     estimate_output_volume,
-    get_chunk_number,
+    get_chunk_numbers,
+    get_output_coordinate_overlap,
     get_suggested_cpu_count,
     recover_global_position,
 )
@@ -79,8 +80,8 @@ def main():
     target_size_mb = 256
     n_workers = 10
     batch_size = 1
-    prediction_chunksize = (64, 64, 64)
-    overlap_prediction_chunksize = (0, 0, 0)  # (30, 30, 30)
+    prediction_chunksize = (128, 128, 128)
+    overlap_prediction_chunksize = (30, 30, 30)
     super_chunksize = None
     logger = create_logger(output_log_path=".")
 
@@ -129,15 +130,15 @@ def main():
         overlap_prediction_chunksize
     )
 
-    output_zarr_path = "./test_dataset.zarr"
-    output_zarr = zarr.open(
-        output_zarr_path,
-        "w",
-        shape=output_volume_shape,
-        chunks=prediction_chunksize_overlap,
-        dtype=np.uint16,
-    )
-    logger.info(f"Rechunking zarr in path: {output_zarr_path}")
+    # output_zarr_path = "./test_dataset.zarr"
+    # output_zarr = zarr.open(
+    #     output_zarr_path,
+    #     "w",
+    #     shape=output_volume_shape,
+    #     chunks=prediction_chunksize_overlap,
+    #     dtype=np.uint16,
+    # )
+    # logger.info(f"Rechunking zarr in path: {output_zarr_path}")
 
     logger.info(
         f"Initial shape: {zarr_dataset.lazy_data.shape} - Estimated output volume shape: {output_volume_shape}"
@@ -173,48 +174,34 @@ def main():
                 f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
             )
 
-        global_coord_pos = recover_global_position(
-            image_shape=output_volume_shape,
+        (
+            global_coord_pos,
+            global_coord_positions_start,
+            global_coord_positions_end,
+        ) = recover_global_position(
             super_chunk_slice=sample.batch_super_chunk[0],
-            internal_slice=sample.batch_internal_slice[0],
-            overlap_prediction_chunksize=overlap_prediction_chunksize,
+            internal_slices=sample.batch_internal_slice,
         )
 
         # Chunk number from original dataset without overlap
         # The overlap happens from current left chunk to right/bottom/depth chunk
-        chunk_axis_number = get_chunk_number(
+        chunk_axis_numbers = get_chunk_numbers(
             image_shape=zarr_dataset.lazy_data.shape,
-            zyx_pos=(
-                global_coord_pos[0].start,
-                global_coord_pos[1].start,
-                global_coord_pos[2].start,
-            ),
-            chunk_size_zyx=prediction_chunksize,
+            nd_positions=global_coord_positions_start,
+            nd_chunk_size=prediction_chunksize,
         )
 
-        destination_position_start = (prediction_chunksize_overlap) * np.array(
-            chunk_axis_number
+        dest_pos_slices = get_output_coordinate_overlap(
+            chunk_axis_numbers=chunk_axis_numbers,
+            prediction_chunksize_overlap=prediction_chunksize_overlap,
+            batch_img_tensor_shape=sample.batch_tensor.shape,
         )
-        destination_position_end = destination_position_start + np.array(
-            sample.batch_tensor.shape[-3:]
-        )
-
-        destination_position = []
-        for ix in range(0, len(destination_position_end)):
-            destination_position.append(
-                slice(
-                    destination_position_start[ix],
-                    destination_position_end[ix],
-                )
-            )
-
-        destination_position = tuple(destination_position)
 
         logger.info(
-            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global pos: {global_coord_pos} - dest chunk: {chunk_axis_number} - dest pos: {destination_position}"
+            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global pos: {global_coord_pos} - dest chunk: {chunk_axis_numbers} - dest pos: {dest_pos_slices}"
         )
 
-        output_zarr[destination_position] = sample.batch_tensor[0, ...].numpy()
+        # output_zarr[destination_position] = sample.batch_tensor[0, ...].numpy()
 
         # numpy_arr = sample.batch_tensor[0, ...].numpy()
         # logger.info(f"BLock shape: {numpy_arr.shape}")
