@@ -117,8 +117,8 @@ def main():
     )
     end_time = time.time()
 
-    print(f"Array shape: {zarr_dataset.lazy_data.shape}")
-    print(f"Prediction chunksize: {prediction_chunksize}")
+    logger.info(f"Array shape: {zarr_dataset.lazy_data.shape}")
+    logger.info(f"Prediction chunksize: {prediction_chunksize}")
 
     output_volume_shape = estimate_output_volume(
         image_shape=zarr_dataset.lazy_data.shape,
@@ -201,7 +201,7 @@ def main():
             f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global pos: {global_coord_pos} - dest chunk: {chunk_axis_numbers} - dest pos: {dest_pos_slices}"
         )
 
-        # output_zarr[destination_position] = sample.batch_tensor[0, ...].numpy()
+        # output_zarr[dest_pos_slices] = sample.batch_tensor[0, ...].numpy()
 
         # numpy_arr = sample.batch_tensor[0, ...].numpy()
         # logger.info(f"BLock shape: {numpy_arr.shape}")

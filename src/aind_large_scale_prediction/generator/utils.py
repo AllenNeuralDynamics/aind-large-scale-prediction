@@ -402,12 +402,7 @@ def recover_global_position(
         for idx in range(len_internal_slices):
             start = internal_slice[idx].start + super_chunk_slice[idx].start
             stop = internal_slice[idx].stop - internal_slice[idx].start
-            zyx_internal_slice.append(
-                slice(
-                    start,
-                    stop
-                )
-            ) 
+            zyx_internal_slice.append(slice(start, stop))
             zyx_internal_slice_start.append(start)
             zyx_internal_slice_end.append(stop)
 
@@ -415,13 +410,17 @@ def recover_global_position(
         zyx_global_slices_end.append(tuple(zyx_internal_slice_end))
         zyx_global_slices.append(tuple(zyx_internal_slice))
 
-    return tuple(zyx_internal_slice), tuple(zyx_global_slices_start), tuple(zyx_global_slices_end)
+    return (
+        tuple(zyx_internal_slice),
+        tuple(zyx_global_slices_start),
+        tuple(zyx_global_slices_end),
+    )
 
 
 def get_output_coordinate_overlap(
     chunk_axis_numbers: np.array,
     prediction_chunksize_overlap: np.array,
-    batch_img_tensor_shape: Tuple[int]
+    batch_img_tensor_shape: Tuple[int],
 ):
     """
     Get output coordinate when we are iterating
@@ -435,7 +434,7 @@ def get_output_coordinate_overlap(
 
     prediction_chunksize_overlap: np.array
         Overlap between contiguous chunks.
-    
+
     batch_img_tensor_shape: Tuple[int]
         Shape of the images excluding the
         batch number
@@ -447,14 +446,12 @@ def get_output_coordinate_overlap(
         will be written.
     """
 
-    n_dims = len(chunk_axis_numbers)
+    n_dims = len(chunk_axis_numbers[0])
     if n_dims < len(batch_img_tensor_shape):
         batch_img_tensor_shape = batch_img_tensor_shape[-n_dims:]
 
     dest_pos_start = chunk_axis_numbers * prediction_chunksize_overlap
-    dest_pos_end = dest_pos_start + np.array(
-        batch_img_tensor_shape
-    )
+    dest_pos_end = dest_pos_start + np.array(batch_img_tensor_shape)
 
     dest_pos_slices = []
     for position in range(0, dest_pos_start.shape[0]):
