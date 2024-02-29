@@ -411,6 +411,7 @@ class ZarrSuperChunks(Dataset):
                 target_size_mb=self.target_size_mb,
                 mode="cycle",
             )
+
             new_super_chunksize = _closer_to_target_chunksize(
                 super_chunksize=new_super_chunksize,
                 chunksize=self.lazy_data.chunksize,  # self.prediction_chunksize
@@ -429,7 +430,6 @@ class ZarrSuperChunks(Dataset):
                 # TODO overlap region between loaded super chunks
             )
         )
-        print("Super chunk slices: ", super_chunk_slices)
 
         # Generating internal slices per generated super chunk
         internal_slices = tuple(

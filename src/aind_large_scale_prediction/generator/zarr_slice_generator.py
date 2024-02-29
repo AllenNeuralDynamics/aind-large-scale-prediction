@@ -283,14 +283,15 @@ class BlockedZarrArrayIterator:
         Returns:
             the block shape
         """
+        axes = len(arr.chunksize)
         if isinstance(arr, da.Array):
-            chunks = arr.chunksize[-3:]
+            chunks = arr.chunksize[-axes:]
         else:
-            chunks = arr.chunks[-3:]
+            chunks = arr.chunks[-axes:]
 
         return expand_chunks(
             chunks,
-            arr.shape[-3:],
+            arr.shape[-axes:],
             target_size_mb * 1024**2,
             arr.itemsize,
             mode,
