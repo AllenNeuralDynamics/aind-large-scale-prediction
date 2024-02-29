@@ -399,9 +399,15 @@ def recover_global_position(
         zyx_internal_slice_end = []
         zyx_internal_slice = []
 
-        for idx in range(len_internal_slices):
-            start = internal_slice[idx].start + super_chunk_slice[idx].start
-            stop = internal_slice[idx].stop - internal_slice[idx].start
+        for idx_internal in range(len_internal_slices):
+            start = (
+                internal_slice[idx_internal].start
+                + super_chunk_slice[idx_internal].start
+            )
+            stop = start + (
+                internal_slice[idx_internal].stop
+                - internal_slice[idx_internal].start
+            )
             zyx_internal_slice.append(slice(start, stop))
             zyx_internal_slice_start.append(start)
             zyx_internal_slice_end.append(stop)
