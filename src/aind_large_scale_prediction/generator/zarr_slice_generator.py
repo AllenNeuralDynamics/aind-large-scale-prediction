@@ -72,7 +72,7 @@ def _closer_to_target_chunksize(
 
     factors = np.array(
         [
-            int(np.rint(super_chunksize[idx] / chunksize[idx]))
+            int(np.rint(np.ceil(super_chunksize[idx] / chunksize[idx])))
             for idx in range(super_chunksize_len)
         ]
     )
