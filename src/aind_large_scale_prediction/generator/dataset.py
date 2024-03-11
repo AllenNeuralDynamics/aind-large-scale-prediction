@@ -405,7 +405,8 @@ class ZarrSuperChunks(Dataset):
 
         # Overwriting super chunk size if target size in mb is provided
         new_super_chunksize = self.super_chunksize
-        if self.target_size_mb:
+        if self.target_size_mb and self.super_chunksize is None:
+            print(f"Estimating super chunksize. Provided super chunksize: {self.super_chunksize} - Target MB: {self.target_size_mb}")
             new_super_chunksize = zarr_iterator.get_block_shape(
                 arr=self.lazy_data,
                 target_size_mb=self.target_size_mb,
