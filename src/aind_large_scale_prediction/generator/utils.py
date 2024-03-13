@@ -264,15 +264,16 @@ def estimate_output_volume(
             "Please, verify the parameters for the output volume function"
         )
 
-    iter_positions = range(0, len(image_shape))
+    dims = len(image_shape)
+    iter_positions = range(0, dims)
 
     res = []
     for dim in iter_positions:
         chunk_size_axis = np.ceil(image_shape[dim] / chunk_shape[dim])
         new_axis_lenght = (chunk_size_axis * chunk_shape[dim]) + (
-            (chunk_size_axis - 1) * overlap_per_axis[dim]
+            (chunk_size_axis) * (overlap_per_axis[dim] * 2)
         )
-        res.append(int(new_axis_lenght))
+        res.append(np.floor(new_axis_lenght).astype(int))
 
     return tuple(res)
 
@@ -304,9 +305,11 @@ def get_chunk_numbers(
         Tuple with the location of the chunk
     """
     nd_positions = np.array(nd_positions)
+    # print("Position start: ", nd_positions, " chunksize: ", nd_chunk_size)
     nd_positions = np.clip(
         nd_positions, 1, np.array(image_shape) - 1, out=nd_positions
     )
+    # print("CLipped pos: ", nd_positions)
     nd_positions = nd_positions.transpose()
 
     for axis in range(nd_positions.shape[0]):
@@ -315,6 +318,8 @@ def get_chunk_numbers(
         ).astype(np.uint32)
 
     nd_positions = nd_positions.transpose()
+    # print("Chunk: ", nd_positions)
+    # exit()
     return nd_positions
 
 

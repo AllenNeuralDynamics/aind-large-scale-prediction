@@ -61,6 +61,31 @@ def create_logger(output_log_path: str) -> logging.Logger:
     return logger
 
 
+def unpad_global_coords(
+    chunk_axis_numbers,
+    prediction_chunksize,
+    dest_pos_slices,
+    zarr_dataset,
+):
+    # Unpadding global coords for storing intermediate results
+    start_pos = np.array(chunk_axis_numbers[0]) * np.array(
+        prediction_chunksize
+    )
+    unpadded_global_slice = []
+
+    for idx_dest in range(len(dest_pos_slices)):
+        start = max(start_pos[idx_dest], 0)
+        stop = min(
+            start + prediction_chunksize[idx_dest],
+            zarr_dataset.lazy_data.shape[idx_dest],
+        )
+        unpadded_global_slice.append(slice(start, stop))
+
+    unpadded_global_slice = tuple(unpadded_global_slice)
+
+    return unpadded_global_slice
+
+
 def main():
     """
     Main function
@@ -77,12 +102,12 @@ def main():
     #
 
     multiscale = "3"
-    target_size_mb = 256
-    n_workers = 10
+    target_size_mb = 1024
+    n_workers = 0
     batch_size = 1
     prediction_chunksize = (128, 128, 128)
     overlap_prediction_chunksize = (30, 30, 30)
-    super_chunksize = None
+    super_chunksize = None  # (512, 512, 512)
     logger = create_logger(output_log_path=".")
 
     suggested_cpus = get_suggested_cpu_count()
@@ -126,19 +151,25 @@ def main():
         overlap_per_axis=overlap_prediction_chunksize,
     )
 
-    prediction_chunksize_overlap = np.array(prediction_chunksize) + np.array(
-        overlap_prediction_chunksize
+    prediction_chunksize_overlap = np.array(prediction_chunksize) + (
+        np.array(overlap_prediction_chunksize) * 2
     )
 
-    # output_zarr_path = "./test_dataset.zarr"
-    # output_zarr = zarr.open(
-    #     output_zarr_path,
-    #     "w",
-    #     shape=output_volume_shape,
-    #     chunks=prediction_chunksize_overlap,
-    #     dtype=np.uint16,
-    # )
-    # logger.info(f"Rechunking zarr in path: {output_zarr_path}")
+    output_zarr_path = "./test_dataset.zarr"
+    output_zarr = zarr.open(
+        output_zarr_path,
+        "w",
+        shape=zarr_dataset.lazy_data.shape,  # output_volume_shape,
+        chunks=tuple(prediction_chunksize),  # prediction_chunksize_overlap,
+        dtype=np.uint16,
+    )
+    data = np.zeros(output_zarr.shape)
+    data.fill(100)
+
+    output_zarr[:] = data
+    logger.info(
+        f"Rechunking zarr in path: {output_zarr_path} - {output_zarr} - chunks: {output_zarr.chunks}"
+    )
 
     logger.info(
         f"Initial shape: {zarr_dataset.lazy_data.shape} - Estimated output volume shape: {output_volume_shape}"
@@ -154,6 +185,7 @@ def main():
         f"Number of batches: {total_batches} - Samples per iteration: {samples_per_iter}"
     )
     logger.info(f"Defined super chunk size: {zarr_dataset.super_chunksize}")
+    logger.info(f"Super chunk slices: {zarr_dataset.super_chunk_slices}")
 
     start_time = time.time()
 
@@ -185,12 +217,18 @@ def main():
 
         # Chunk number from original dataset without overlap
         # The overlap happens from current left chunk to right/bottom/depth chunk
+
+        moved_global_pos = np.array(global_coord_positions_start)
+        moved_global_pos[moved_global_pos > 0] += overlap_prediction_chunksize[
+            0
+        ]
         chunk_axis_numbers = get_chunk_numbers(
             image_shape=zarr_dataset.lazy_data.shape,
-            nd_positions=global_coord_positions_start,
+            nd_positions=moved_global_pos,  # Moving left top coords to original
             nd_chunk_size=prediction_chunksize,
         )
 
+        # These slices are to write the overlaped output chunks to the output zarr
         dest_pos_slices = get_output_coordinate_overlap(
             chunk_axis_numbers=chunk_axis_numbers,
             prediction_chunksize_overlap=prediction_chunksize_overlap,
@@ -201,14 +239,62 @@ def main():
             f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global pos: {global_coord_pos} - dest chunk: {chunk_axis_numbers} - dest pos: {dest_pos_slices}"
         )
 
-        # output_zarr[dest_pos_slices] = sample.batch_tensor[0, ...].numpy()
+        apply_negative_overlap = chunk_axis_numbers[0].copy()
+        apply_negative_overlap[apply_negative_overlap > 0] = 1
+        check_overlap_area = (
+            np.array(overlap_prediction_chunksize) * apply_negative_overlap
+        )
 
-        # numpy_arr = sample.batch_tensor[0, ...].numpy()
-        # logger.info(f"BLock shape: {numpy_arr.shape}")
+        print("check_overlap_area: ", check_overlap_area)
+        non_overlap_area = sample.batch_tensor[0, ...].numpy()[
+            check_overlap_area[0] : prediction_chunksize[0]
+            + check_overlap_area[0],
+            check_overlap_area[1] : prediction_chunksize[1]
+            + check_overlap_area[1],
+            check_overlap_area[2] : prediction_chunksize[2]
+            + check_overlap_area[2],
+        ]
+
+        unpadded_global_slice = unpad_global_coords(
+            chunk_axis_numbers,
+            prediction_chunksize,
+            dest_pos_slices[0],
+            zarr_dataset,
+        )
+
+        print(
+            "Non overlap area: ",
+            non_overlap_area.shape,
+            " unpadded global: ",
+            unpadded_global_slice,
+        )
+
+        output_zarr[unpadded_global_slice] = non_overlap_area
+
+        numpy_arr = sample.batch_tensor[0, ...].numpy()
+        logger.info(
+            f"Block shape: {numpy_arr.shape} - nonoverlap area: {non_overlap_area.shape}"
+        )
+
         # max_z_sample = np.max(numpy_arr, axis=0)
         # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+        # fig, axes = plt.subplots(1, 2)
 
-        # plt.imshow(max_z_sample, vmin=vmin, vmax=vmax)
+        # # Plot the first image
+        # axes[0].imshow(max_z_sample, cmap='gray', vmin=vmin, vmax=vmax)
+        # axes[0].set_title('Overlap')
+
+        # max_z_sample_non_over = np.max(non_overlap_area, axis=0)
+        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+
+        # # Plot the second image
+        # axes[1].imshow(max_z_sample_non_over, cmap='gray', vmin=vmin, vmax=vmax)
+        # axes[1].set_title('No overlap')
+
+        # # Adjust layout to prevent overlap
+        # plt.tight_layout()
+
+        # # Show the plot
         # plt.show()
 
     end_time = time.time()
