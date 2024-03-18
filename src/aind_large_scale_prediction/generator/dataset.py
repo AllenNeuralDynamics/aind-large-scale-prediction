@@ -715,9 +715,13 @@ class ZarrSuperChunks(Dataset):
         current_internal_slice = self.internal_slices[
             self.curr_super_chunk_pos.value
         ][curr_internal_super_chunk_position]
-        current_internal_slice_global = self.global_internal_slices[
-            self.curr_super_chunk_pos.value
-        ][curr_internal_super_chunk_position]
+
+        current_internal_slice_global = None
+        if self.global_internal_slices is not None:
+            current_internal_slice_global = self.global_internal_slices[
+                self.curr_super_chunk_pos.value
+            ][curr_internal_super_chunk_position]
+
         curr_super_chunk_position = self.super_chunk_slices[
             self.curr_super_chunk_pos.value
         ]
@@ -806,9 +810,13 @@ class ZarrSuperChunks(Dataset):
             current_internal_slice = self.internal_slices[
                 self.curr_super_chunk_pos.value
             ][curr_internal_super_chunk_position]
-            current_internal_slice_global = self.global_internal_slices[
-                self.curr_super_chunk_pos.value
-            ][curr_internal_super_chunk_position]
+
+            current_internal_slice_global = None
+            if self.global_internal_slices is not None:
+                current_internal_slice_global = self.global_internal_slices[
+                    self.curr_super_chunk_pos.value
+                ][curr_internal_super_chunk_position]
+
             pulled_prediction_chunk = self.super_chunk_in_memory[
                 current_internal_slice
             ]
