@@ -92,6 +92,7 @@ class ZarrCustomBatch:
         batch_tensor: List[torch.Tensor],
         batch_super_chunk: List[Tuple[int]],
         batch_internal_slice: List[Tuple[int]],
+        batch_internal_slice_global: List[Tuple[int]],
         device: Optional[torch.cuda.Device] = None,
     ):
         """
@@ -118,6 +119,7 @@ class ZarrCustomBatch:
         self.batch_tensor = torch.stack(batch_tensor)
         self.batch_super_chunk = tuple(batch_super_chunk)
         self.batch_internal_slice = tuple(batch_internal_slice)
+        self.batch_internal_slice_global = tuple(batch_internal_slice_global)
 
         if device is not None:
             self.batch_tensor = self.batch_tensor.to(device, non_blocking=True)
@@ -155,10 +157,13 @@ def collate_fn(
     batch_tensor = []
     batch_super_chunk = []
     batch_internal_slice = []
+    batch_internal_slice_global = []
+
     for item in dataloader_return:
         batch_item = item[0]
         batch_super_chunk.append(item[1])
         batch_internal_slice.append(item[2])
+        batch_internal_slice_global.append(item[3])
 
         prediction_chunksize = tuple(
             [slice_obj.stop - slice_obj.start for slice_obj in item[2]]
@@ -188,6 +193,7 @@ def collate_fn(
         batch_tensor=batch_tensor,
         batch_super_chunk=batch_super_chunk,
         batch_internal_slice=batch_internal_slice,
+        batch_internal_slice_global=batch_internal_slice_global,
         device=device,
     )
 
@@ -709,6 +715,9 @@ class ZarrSuperChunks(Dataset):
         current_internal_slice = self.internal_slices[
             self.curr_super_chunk_pos.value
         ][curr_internal_super_chunk_position]
+        current_internal_slice_global = self.global_internal_slices[
+            self.curr_super_chunk_pos.value
+        ][curr_internal_super_chunk_position]
         curr_super_chunk_position = self.super_chunk_slices[
             self.curr_super_chunk_pos.value
         ]
@@ -721,7 +730,12 @@ class ZarrSuperChunks(Dataset):
                 self.curr_super_chunk_pos.value
             ] += 1
 
-        return pulled_chunk, curr_super_chunk_position, current_internal_slice
+        return (
+            pulled_chunk,
+            curr_super_chunk_position,
+            current_internal_slice,
+            current_internal_slice_global,
+        )
 
     def __getitem__(self, index: int) -> torch.Tensor:
         """
@@ -792,6 +806,9 @@ class ZarrSuperChunks(Dataset):
             current_internal_slice = self.internal_slices[
                 self.curr_super_chunk_pos.value
             ][curr_internal_super_chunk_position]
+            current_internal_slice_global = self.global_internal_slices[
+                self.curr_super_chunk_pos.value
+            ][curr_internal_super_chunk_position]
             pulled_prediction_chunk = self.super_chunk_in_memory[
                 current_internal_slice
             ]
@@ -801,12 +818,14 @@ class ZarrSuperChunks(Dataset):
                 pulled_prediction_chunk,
                 curr_super_chunk_position,
                 current_internal_slice,
+                current_internal_slice_global,
             ) = self.__parallel_get_item(index)
 
         return (
             pulled_prediction_chunk,
             curr_super_chunk_position,
             current_internal_slice,
+            current_internal_slice_global,
         )
 
     def __len__(self) -> int:
