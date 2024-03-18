@@ -92,6 +92,7 @@ class ZarrCustomBatch:
         batch_tensor: List[torch.Tensor],
         batch_super_chunk: List[Tuple[int]],
         batch_internal_slice: List[Tuple[int]],
+        batch_internal_slice_global: List[Tuple[int]],
         device: Optional[torch.cuda.Device] = None,
     ):
         """
@@ -118,6 +119,7 @@ class ZarrCustomBatch:
         self.batch_tensor = torch.stack(batch_tensor)
         self.batch_super_chunk = tuple(batch_super_chunk)
         self.batch_internal_slice = tuple(batch_internal_slice)
+        self.batch_internal_slice_global = tuple(batch_internal_slice_global)
 
         if device is not None:
             self.batch_tensor = self.batch_tensor.to(device, non_blocking=True)
@@ -155,10 +157,13 @@ def collate_fn(
     batch_tensor = []
     batch_super_chunk = []
     batch_internal_slice = []
+    batch_internal_slice_global = []
+
     for item in dataloader_return:
         batch_item = item[0]
         batch_super_chunk.append(item[1])
         batch_internal_slice.append(item[2])
+        batch_internal_slice_global.append(item[3])
 
         prediction_chunksize = tuple(
             [slice_obj.stop - slice_obj.start for slice_obj in item[2]]
@@ -188,6 +193,7 @@ def collate_fn(
         batch_tensor=batch_tensor,
         batch_super_chunk=batch_super_chunk,
         batch_internal_slice=batch_internal_slice,
+        batch_internal_slice_global=batch_internal_slice_global,
         device=device,
     )
 
@@ -274,7 +280,8 @@ class ZarrSuperChunks(Dataset):
         (
             self.super_chunksize,
             self.super_chunk_slices,
-            self.internal_slices,
+            self.internal_slices,  # Local coord system within each superchunk
+            self.global_internal_slices,
             self.zarr_iterator,
         ) = self.__init_super_chunks_iter()
 
@@ -405,7 +412,11 @@ class ZarrSuperChunks(Dataset):
 
         # Overwriting super chunk size if target size in mb is provided
         new_super_chunksize = self.super_chunksize
-        if self.target_size_mb:
+        if self.target_size_mb and self.super_chunksize is None:
+
+            print(
+                f"Estimating super chunksize. Provided super chunksize: {self.super_chunksize} - Target MB: {self.target_size_mb}"
+            )
             new_super_chunksize = zarr_iterator.get_block_shape(
                 arr=self.lazy_data,
                 target_size_mb=self.target_size_mb,
@@ -414,7 +425,7 @@ class ZarrSuperChunks(Dataset):
 
             new_super_chunksize = _closer_to_target_chunksize(
                 super_chunksize=new_super_chunksize,
-                chunksize=self.lazy_data.chunksize,  # self.prediction_chunksize
+                chunksize=self.prediction_chunksize,
             )
 
             print(
@@ -426,36 +437,57 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator.gen_slices(
                 arr_shape=self.lazy_data.shape,
                 block_shape=new_super_chunksize,
-                overlap_shape=self.overlap_prediction_chunksize,
-                # TODO overlap region between loaded super chunks
+                overlap_shape=self.overlap_prediction_chunksize,  # Super chunk slices with overlap between them
             )
         )
 
-        # Generating internal slices per generated super chunk
-        internal_slices = tuple(
-            tuple(
-                zarr_iterator.gen_slices(
-                    arr_shape=self.lazy_data[super_chunk_slice].shape,
-                    block_shape=self.prediction_chunksize,
-                    overlap_shape=self.overlap_prediction_chunksize,
-                )
-            )
-            for super_chunk_slice in super_chunk_slices
-        )
+        local_internal_slices = None
+        global_internal_slices = None
 
-        np_overlap = np.array(self.overlap_prediction_chunksize)
+        np_overlap = np.array(self.overlap_prediction_chunksize) * 2
         if np.any(np_overlap):
+            print(
+                f"Adding overlap area to super chunk size: {new_super_chunksize} - {tuple(np.array(new_super_chunksize) + np_overlap)}"
+            )
             new_super_chunksize = tuple(
                 np.array(new_super_chunksize) + np_overlap
             )
-            print(
-                f"Adding overlap area to super chunk size: {new_super_chunksize}"
+
+            local_internal_slices = []
+            global_internal_slices = []
+
+            for sc in super_chunk_slices:
+                local_slices, global_slices = (
+                    zarr_iterator.gen_over_slices_on_over_superchunks(
+                        arr_shape=self.lazy_data[sc].shape,
+                        block_shape=self.prediction_chunksize,
+                        overlap_shape=self.overlap_prediction_chunksize,
+                        super_chunk_slices=sc,
+                        dataset_shape=self.lazy_data.shape,
+                    )
+                )
+                local_internal_slices.append(tuple(local_slices))
+                global_internal_slices.append(tuple(global_slices))
+
+            global_internal_slices = tuple(global_internal_slices)
+            local_internal_slices = tuple(local_internal_slices)
+
+        else:
+            local_internal_slices = tuple(
+                tuple(
+                    zarr_iterator.gen_slices(
+                        arr_shape=self.lazy_data[super_chunk_slice].shape,
+                        block_shape=self.prediction_chunksize,
+                    )
+                )
+                for super_chunk_slice in super_chunk_slices
             )
 
         return (
             new_super_chunksize,
             super_chunk_slices,
-            internal_slices,
+            local_internal_slices,
+            global_internal_slices,
             zarr_iterator,
         )
 
@@ -562,7 +594,15 @@ class ZarrSuperChunks(Dataset):
             so arrays match in size.
 
         """
+        curr_super_chunk_slices = self.super_chunk_slices[
+            self.curr_super_chunk_pos.value
+        ]
+
+        # If super chunk in memory is not equal to future super chunk shape
         if self.super_chunk_in_memory.shape != future_super_chunk_shape:
+
+            # It means that we are at the end of the block and we cannot
+            # pull data to the overlap region from other blocks
             pad_width = tuple(
                 (
                     0,
@@ -574,10 +614,9 @@ class ZarrSuperChunks(Dataset):
                 for idx in range(len(future_super_chunk_shape))
             )
 
+            # Padding if necessary
             padded_lazy_data = da.pad(
-                array=self.lazy_data[
-                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
-                ],
+                array=self.lazy_data[curr_super_chunk_slices],
                 pad_width=pad_width,
                 mode="constant",
                 constant_values=0,
@@ -676,6 +715,9 @@ class ZarrSuperChunks(Dataset):
         current_internal_slice = self.internal_slices[
             self.curr_super_chunk_pos.value
         ][curr_internal_super_chunk_position]
+        current_internal_slice_global = self.global_internal_slices[
+            self.curr_super_chunk_pos.value
+        ][curr_internal_super_chunk_position]
         curr_super_chunk_position = self.super_chunk_slices[
             self.curr_super_chunk_pos.value
         ]
@@ -688,7 +730,12 @@ class ZarrSuperChunks(Dataset):
                 self.curr_super_chunk_pos.value
             ] += 1
 
-        return pulled_chunk, curr_super_chunk_position, current_internal_slice
+        return (
+            pulled_chunk,
+            curr_super_chunk_position,
+            current_internal_slice,
+            current_internal_slice_global,
+        )
 
     def __getitem__(self, index: int) -> torch.Tensor:
         """
@@ -759,6 +806,9 @@ class ZarrSuperChunks(Dataset):
             current_internal_slice = self.internal_slices[
                 self.curr_super_chunk_pos.value
             ][curr_internal_super_chunk_position]
+            current_internal_slice_global = self.global_internal_slices[
+                self.curr_super_chunk_pos.value
+            ][curr_internal_super_chunk_position]
             pulled_prediction_chunk = self.super_chunk_in_memory[
                 current_internal_slice
             ]
@@ -768,12 +818,14 @@ class ZarrSuperChunks(Dataset):
                 pulled_prediction_chunk,
                 curr_super_chunk_position,
                 current_internal_slice,
+                current_internal_slice_global,
             ) = self.__parallel_get_item(index)
 
         return (
             pulled_prediction_chunk,
             curr_super_chunk_position,
             current_internal_slice,
+            current_internal_slice_global,
         )
 
     def __len__(self) -> int:
@@ -982,11 +1034,18 @@ def create_data_loader(
 
     _print(f"Initial shape: {lazy_data.shape}")
 
-    lazy_data = reshape_dataset_to_prediction_chunks(
-        lazy_data=lazy_data, prediction_chunksize=prediction_chunksize
+    overlapped_prediction_chunksize = np.array(prediction_chunksize) + (
+        np.array(overlap_prediction_chunksize) * 2
     )
 
-    _print(f"Shape after adding zeros in borders: {lazy_data.shape}")
+    lazy_data = reshape_dataset_to_prediction_chunks(
+        lazy_data=lazy_data,
+        prediction_chunksize=overlapped_prediction_chunksize,
+    )
+
+    _print(
+        f"Shape after adding zeros in borders: {lazy_data.shape} with prediction chunksize: {overlapped_prediction_chunksize}"
+    )
 
     if lazy_callback_fn is not None:
         lazy_data = lazy_callback_fn(lazy_data)
@@ -996,7 +1055,7 @@ def create_data_loader(
     if device is not None:
         device = torch.device(device)
         multiprocessing_context = "spawn"
-        print(
+        _print(
             f"Torch device: {device} and mp context {multiprocessing_context}"
         )
 

@@ -264,15 +264,16 @@ def estimate_output_volume(
             "Please, verify the parameters for the output volume function"
         )
 
-    iter_positions = range(0, len(image_shape))
+    dims = len(image_shape)
+    iter_positions = range(0, dims)
 
     res = []
     for dim in iter_positions:
         chunk_size_axis = np.ceil(image_shape[dim] / chunk_shape[dim])
         new_axis_lenght = (chunk_size_axis * chunk_shape[dim]) + (
-            (chunk_size_axis - 1) * overlap_per_axis[dim]
+            (chunk_size_axis) * (overlap_per_axis[dim] * 2)
         )
-        res.append(int(new_axis_lenght))
+        res.append(np.floor(new_axis_lenght).astype(int))
 
     return tuple(res)
 
@@ -304,9 +305,11 @@ def get_chunk_numbers(
         Tuple with the location of the chunk
     """
     nd_positions = np.array(nd_positions)
+    # print("Position start: ", nd_positions, " chunksize: ", nd_chunk_size)
     nd_positions = np.clip(
         nd_positions, 1, np.array(image_shape) - 1, out=nd_positions
     )
+    # print("CLipped pos: ", nd_positions)
     nd_positions = nd_positions.transpose()
 
     for axis in range(nd_positions.shape[0]):
@@ -315,6 +318,8 @@ def get_chunk_numbers(
         ).astype(np.uint32)
 
     nd_positions = nd_positions.transpose()
+    # print("Chunk: ", nd_positions)
+    # exit()
     return nd_positions
 
 
@@ -473,3 +478,63 @@ def get_output_coordinate_overlap(
         dest_pos_slices.append(tuple(curr_pos))
 
     return tuple(dest_pos_slices)
+
+
+def unpad_global_coords(
+    global_coord_pos: Tuple[slice, ...],
+    block_shape: Tuple[int],
+    overlap_prediction_chunksize: Tuple[int],
+    dataset_shape: Tuple[int],
+) -> Tuple[Tuple[int], Tuple[int]]:
+    """
+    Function that unpads global coordinates based
+    on the overlapping chunk area.
+
+    Parameters
+    ----------
+    global_coord_pos: Tuple[slice, ...]
+        global coordinate position of current chunk
+
+    block_shape: Tuple[int]
+        Block shape
+
+    overlap_prediction_chunksize: Tuple[int]
+        Overlap happening in each axis
+
+    dataset_shape: Tuple[int]
+        Dataset shape
+
+    Returns
+    -------
+    Tuple[Tuple[int], Tuple[int]]
+        Tuple with the unpadded global coordinate position
+        and the local coordinate position that will be used
+        within the overlaped chunk.
+    """
+    unpadded_glob_coord_pos = []
+    unpadded_local_coord_pos = []
+    for idx, ax_pos in enumerate(global_coord_pos):
+        global_curr_left = ax_pos.start + overlap_prediction_chunksize[idx]
+        global_curr_right = ax_pos.stop - overlap_prediction_chunksize[idx]
+
+        local_curr_left = overlap_prediction_chunksize[idx]
+        local_curr_right = block_shape[idx] - overlap_prediction_chunksize[idx]
+
+        if ax_pos.start == 0:
+            # No padding to the left
+            global_curr_left = 0
+            local_curr_left = 0
+
+        if ax_pos.stop == dataset_shape[idx]:
+            global_curr_right = ax_pos.stop
+            local_curr_right = block_shape[idx]
+
+        unpadded_glob_coord_pos.append(
+            slice(global_curr_left, global_curr_right)
+        )
+
+        unpadded_local_coord_pos.append(
+            slice(local_curr_left, local_curr_right)
+        )
+
+    return tuple(unpadded_glob_coord_pos), tuple(unpadded_local_coord_pos)
