@@ -9,9 +9,11 @@ from itertools import chain
 from sys import getsizeof, stderr
 from typing import List, Optional, Tuple
 
+import dask.array as da
 import numpy as np
 
-from .._shared.types import ArrayLike
+from .._shared.types import ArrayLike, PathLike
+from ..io import ImageReaderFactory
 
 try:
     from reprlib import repr
@@ -538,3 +540,43 @@ def unpad_global_coords(
         )
 
     return tuple(unpadded_glob_coord_pos), tuple(unpadded_local_coord_pos)
+
+
+def concatenate_lazy_data(
+    dataset_paths: List[PathLike], multiscale: str, concat_axis: int
+) -> ArrayLike:
+    """
+    Concatenates lazy datasets in a given axis.
+
+    Parameters
+    ----------
+    dataset_paths: List[PathLike]
+        List of datasets that will be concatenated
+        in a given axis.
+
+    multiscale: str
+        Multiscale we are going to load for all channels.
+
+    concat_axis: int
+        Concatenation axis.
+
+    Returns
+    -------
+    ArrayLike:
+        Concatenated lazy data.
+    """
+
+    lazy_datasets = [
+        ImageReaderFactory()
+        .create(
+            data_path=dataset_path,
+            parse_path=False,
+            multiscale=multiscale,
+        )
+        .as_dask_array()
+        for dataset_path in dataset_paths
+    ]
+
+    # It will indirectly raise an error if shapes
+    # are not the same except for the concat axis
+    return da.concatenate(lazy_datasets, axis=concat_axis)

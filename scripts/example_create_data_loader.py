@@ -15,9 +15,8 @@ import zarr
 
 from aind_large_scale_prediction.generator.dataset import create_data_loader
 from aind_large_scale_prediction.generator.utils import (
+    concatenate_lazy_data,
     estimate_output_volume,
-    get_chunk_numbers,
-    get_output_coordinate_overlap,
     get_suggested_cpu_count,
     recover_global_position,
     unpad_global_coords,
@@ -73,18 +72,25 @@ def main():
         pin_memory = False
         multiprocessing.set_start_method("spawn", force=True)
 
-    dataset_path = "/Users/camilo.laiton/repositories/dispim-cell-seg-exp/data/good_combined_gradients.zarr"
+    dataset_path = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_405.zarr"
+    nuclear_channel = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_3.zarr"
     # "s3://aind-open-data/SmartSPIM_709392_2024-01-29_18-33-39_stitched_2024-02-04_12-45-58/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
     # "s3://aind-open-data/HCR_681417-Easy-GFP_2023-11-10_13-45-01_fused_2024-01-09_13-16-14/channel_561.zarr"
 
-    multiscale = ""  # "3" #
+    multiscale = "3"
     target_size_mb = 1024
-    n_workers = 0
+    n_workers = 16
     batch_size = 1
-    prediction_chunksize = (3, 128, 128, 128)  # (128, 128, 128)
-    overlap_prediction_chunksize = (0, 30, 30, 30)  # (30, 30, 30) #
-    super_chunksize = (3, 512, 512, 512)  # (3, 512, 512, 512)
+    prediction_chunksize = (2, 128, 128, 128)
+    overlap_prediction_chunksize = (0, 30, 30, 30)
+    super_chunksize = (2, 512, 512, 512)
     logger = create_logger(output_log_path=".")
+
+    lazy_data = concatenate_lazy_data(
+        dataset_paths=[dataset_path, nuclear_channel],
+        multiscale=multiscale,
+        concat_axis=-4,
+    )
 
     suggested_cpus = get_suggested_cpu_count()
     logger.info(
@@ -99,8 +105,7 @@ def main():
 
     start_time = time.time()
     zarr_data_loader, zarr_dataset = create_data_loader(
-        dataset_path=dataset_path,
-        multiscale=multiscale,
+        lazy_data=lazy_data,
         target_size_mb=target_size_mb,
         prediction_chunksize=prediction_chunksize,
         overlap_prediction_chunksize=overlap_prediction_chunksize,
@@ -139,10 +144,7 @@ def main():
         chunks=tuple(prediction_chunksize),  # prediction_chunksize_overlap,
         dtype=np.uint16,
     )
-    data = np.zeros(output_zarr.shape)
-    data.fill(100)
 
-    # output_zarr[:] = data
     logger.info(
         f"Rechunking zarr in path: {output_zarr_path} - {output_zarr} - chunks: {output_zarr.chunks}"
     )
@@ -166,21 +168,18 @@ def main():
     start_time = time.time()
 
     for i, sample in enumerate(zarr_data_loader):
-        # logger.info(
-        #     f"Batch {i}: {sample.batch_tensor.shape} - Pinned?: {sample.batch_tensor.is_pinned()} - dtype: {sample.batch_tensor.dtype} - device: {sample.batch_tensor.device}"
-        # )
 
-        # shape = [batch_size]
-        # for ix in range(0, 3):
-        #     shape.append(
-        #         sample.batch_internal_slice[0][ix].stop
-        #         - sample.batch_internal_slice[0][ix].start
-        #     )
+        shape = [batch_size]
+        for ix in range(0, len(prediction_chunksize)):
+            shape.append(
+                sample.batch_internal_slice[0][ix].stop
+                - sample.batch_internal_slice[0][ix].start
+            )
 
-        # if sum(shape) != sum(sample.batch_tensor.shape):
-        #     raise ValueError(
-        #         f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
-        #     )
+        if sum(shape) != sum(sample.batch_tensor.shape):
+            raise ValueError(
+                f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
+            )
 
         (
             global_coord_pos,
@@ -190,49 +189,10 @@ def main():
             super_chunk_slice=sample.batch_super_chunk[0],
             internal_slices=sample.batch_internal_slice,
         )
-
-        # Chunk number from original dataset without overlap
-        # The overlap happens from current left chunk to right/bottom/depth chunk
-
-        moved_global_pos = np.array(global_coord_positions_start)
-        moved_global_pos[moved_global_pos > 0] += overlap_prediction_chunksize[
-            0
-        ]
-        chunk_axis_numbers = get_chunk_numbers(
-            image_shape=zarr_dataset.lazy_data.shape,
-            nd_positions=moved_global_pos,  # Moving left top coords to original
-            nd_chunk_size=prediction_chunksize,
-        )
-
-        # These slices are to write the overlaped output chunks to the output zarr
-        dest_pos_slices = get_output_coordinate_overlap(
-            chunk_axis_numbers=chunk_axis_numbers,
-            prediction_chunksize_overlap=prediction_chunksize_overlap,
-            batch_img_tensor_shape=sample.batch_tensor.shape,
-        )
-
         logger.info(
-            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global intern slice: {sample.batch_internal_slice_global}- global pos: {global_coord_pos} - dest chunk: {chunk_axis_numbers} - dest pos: {dest_pos_slices}"
+            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global intern slice: {sample.batch_internal_slice_global}- global pos: {global_coord_pos}"
         )
 
-        # apply_negative_overlap = chunk_axis_numbers[0].copy()
-        # apply_negative_overlap[apply_negative_overlap > 0] = 1
-        # check_overlap_area = np.array(overlap_prediction_chunksize) * apply_negative_overlap
-
-        # print("check_overlap_area: ", check_overlap_area)
-        # non_overlap_area = sample.batch_tensor[0, ...].numpy()[
-        #     # :,
-        #     check_overlap_area[-3]:prediction_chunksize[-3] + check_overlap_area[-3],
-        #     check_overlap_area[-2]:prediction_chunksize[-2] + check_overlap_area[-2],
-        #     check_overlap_area[-1]:prediction_chunksize[-1] + check_overlap_area[-1],
-        # ]
-
-        # unpadded_global_slice = unpad_global_coords(
-        #     chunk_axis_numbers,
-        #     prediction_chunksize,
-        #     dest_pos_slices[0],
-        #     zarr_dataset
-        # )
         data_block = sample.batch_tensor[0, ...].numpy()
         unpadded_global_slice, unpadded_local_slice = unpad_global_coords(
             global_coord_pos=global_coord_pos,
@@ -242,15 +202,6 @@ def main():
         )
 
         non_overlap_area = data_block[unpadded_local_slice]
-
-        print(
-            "Non overlap area: ",
-            non_overlap_area.shape,
-            " unpadded global: ",
-            unpadded_global_slice,
-            " unpadded local: ",
-            unpadded_local_slice,
-        )
 
         output_zarr[unpadded_global_slice] = non_overlap_area
 

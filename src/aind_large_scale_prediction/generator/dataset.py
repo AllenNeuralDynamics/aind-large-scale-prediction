@@ -28,7 +28,6 @@ from aind_large_scale_prediction.generator.zarr_slice_generator import (
     BlockedZarrArrayIterator,
     _closer_to_target_chunksize,
 )
-from aind_large_scale_prediction.io import ImageReaderFactory
 from aind_large_scale_prediction.io.utils import extract_data
 
 
@@ -943,8 +942,7 @@ def measure_data_loader(start_method: str):
 
 
 def create_data_loader(
-    dataset_path: PathLike,
-    multiscale: str,
+    lazy_data: ArrayLike,
     target_size_mb: int,
     prediction_chunksize: Tuple[int, ...],
     n_workers: int,
@@ -965,12 +963,9 @@ def create_data_loader(
 
     Parameters
     ----------
-    dataset_path: PathLike
-        Path where the dataset is stored. S3 paths are allowed
-        in the form s3://{BUCKET_NAME}/{IMAGE_PATH}/{TILE_NAME}
-
-    multiscale: str
-        Dataset multiscale. e.g., "2"
+    lazy_data: ArrayLike
+        Lazy array to be iterated. This gives flexibility
+        if you need to do some preprocessing before.
 
     target_size_mb: int
         Size in megabytes for each super chunk
@@ -1033,12 +1028,7 @@ def create_data_loader(
         if logger is not None:
             logger.info(message)
 
-    dataset_reader = ImageReaderFactory().create(
-        data_path=dataset_path,
-        parse_path=False,
-        multiscale=multiscale,
-    )
-    lazy_data = extract_data(dataset_reader.as_dask_array().astype(dtype))
+    lazy_data = extract_data(lazy_data).astype(dtype)
 
     _print(f"Initial shape: {lazy_data.shape}")
 
