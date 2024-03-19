@@ -144,9 +144,7 @@ def main():
         chunks=tuple(prediction_chunksize),  # prediction_chunksize_overlap,
         dtype=np.uint16,
     )
-    data = np.zeros(output_zarr.shape)
 
-    # output_zarr[:] = data
     logger.info(
         f"Rechunking zarr in path: {output_zarr_path} - {output_zarr} - chunks: {output_zarr.chunks}"
     )
