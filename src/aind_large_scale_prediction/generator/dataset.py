@@ -4,12 +4,10 @@ to load the models
 """
 
 import logging
-import os
 import time
 from functools import partial
 from typing import Callable, List, Optional, Tuple
 
-import dask
 import dask.array as da
 import numpy as np
 import torch
@@ -17,7 +15,7 @@ import torch.multiprocessing as multp
 import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
-from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
+from aind_large_scale_prediction._shared.types import ArrayLike
 from aind_large_scale_prediction.generator.dataloader import ZarrDataLoader
 from aind_large_scale_prediction.generator.utils import (
     find_position_in_total_sum,
