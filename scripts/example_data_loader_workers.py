@@ -61,6 +61,44 @@ def create_logger(output_log_path: str) -> logging.Logger:
     return logger
 
 
+def execute_worker(
+    data,
+    super_chunk_slice,
+    internal_slice,
+    shared_output_zarr,
+    overlap_prediction_chunksize,
+    dataset_shape,
+):
+
+    (
+        global_coord_pos,
+        global_coord_positions_start,
+        global_coord_positions_end,
+    ) = recover_global_position(
+        super_chunk_slice=super_chunk_slice,
+        internal_slices=internal_slice,
+    )
+
+    unpadded_global_slice, unpadded_local_slice = unpad_global_coords(
+        global_coord_pos=global_coord_pos,
+        block_shape=data.shape,
+        overlap_prediction_chunksize=overlap_prediction_chunksize,
+        dataset_shape=dataset_shape,
+    )
+
+    non_overlap_area = data[unpadded_local_slice]
+
+    shared_output_zarr[unpadded_global_slice] = non_overlap_area
+
+    print(
+        f"Worker PID {os.getpid()}: {data.shape} - Glboal slc: {unpadded_global_slice} - local_slc: {unpadded_local_slice}"
+    )
+
+
+def _execute_worker(params):
+    execute_worker(**params)
+
+
 def main():
     """
     Main function
@@ -103,7 +141,6 @@ def main():
             f"Changing the # Workers to the suggested number of CPUs: {suggested_cpus}"
         )
 
-    start_time = time.time()
     zarr_data_loader, zarr_dataset = create_data_loader(
         lazy_data=lazy_data,
         target_size_mb=target_size_mb,
@@ -120,8 +157,8 @@ def main():
         drop_last=False,
         override_suggested_cpus=False,
         locked_array=True,
+        manager=None,  # manager
     )
-    end_time = time.time()
 
     logger.info(f"Array shape: {zarr_dataset.lazy_data.shape}")
     logger.info(f"Prediction chunksize: {prediction_chunksize}")
@@ -153,8 +190,6 @@ def main():
         f"Initial shape: {zarr_dataset.lazy_data.shape} - Estimated output volume shape: {output_volume_shape}"
     )
 
-    logger.info(f"Time creating data loader: {end_time - start_time}")
-
     total_batches = np.prod(zarr_dataset.lazy_data.shape) / (
         np.prod(zarr_dataset.prediction_chunksize) * batch_size
     )
@@ -167,68 +202,62 @@ def main():
 
     start_time = time.time()
 
+    # Create a pool of processes
+    pool = multiprocessing.Pool(processes=n_workers)
+
+    curr_picked_blocks = 0
+    picked_blocks = []
     for i, sample in enumerate(zarr_data_loader):
-
-        shape = [batch_size]
-        for ix in range(0, len(prediction_chunksize)):
-            shape.append(
-                sample.batch_internal_slice[0][ix].stop
-                - sample.batch_internal_slice[0][ix].start
-            )
-
-        if sum(shape) != sum(sample.batch_tensor.shape):
-            raise ValueError(
-                f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
-            )
-
-        (
-            global_coord_pos,
-            global_coord_positions_start,
-            global_coord_positions_end,
-        ) = recover_global_position(
-            super_chunk_slice=sample.batch_super_chunk[0],
-            internal_slices=sample.batch_internal_slice,
-        )
-        logger.info(
-            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global intern slice: {sample.batch_internal_slice_global}- global pos: {global_coord_pos}"
+        print(
+            f"[PID: {os.getpid()}] Dispatcher job: {sample.batch_tensor[0, ...].shape}"
         )
 
-        data_block = sample.batch_tensor[0, ...].numpy()
-        unpadded_global_slice, unpadded_local_slice = unpad_global_coords(
-            global_coord_pos=global_coord_pos,
-            block_shape=data_block.shape,
-            overlap_prediction_chunksize=overlap_prediction_chunksize,
-            dataset_shape=zarr_dataset.lazy_data.shape,
+        picked_blocks.append(
+            {
+                "data": np.squeeze(sample.batch_tensor.numpy()),
+                "super_chunk_slice": sample.batch_super_chunk[0],
+                "internal_slice": sample.batch_internal_slice,
+                "shared_output_zarr": output_zarr,
+                "overlap_prediction_chunksize": overlap_prediction_chunksize,
+                "dataset_shape": zarr_dataset.lazy_data.shape,
+            }
         )
+        curr_picked_blocks += 1
 
-        non_overlap_area = data_block[unpadded_local_slice]
+        if curr_picked_blocks == n_workers:
 
-        output_zarr[unpadded_global_slice] = non_overlap_area
+            # Assigning blocks to execution workers
+            jobs = [
+                pool.apply_async(_execute_worker, args=(picked_block,))
+                for picked_block in picked_blocks
+            ]
 
-        logger.info(
-            f"Block shape: {data_block.shape} - nonoverlap area: {non_overlap_area.shape}"
-        )
+            print(f"Dispatcher PID {os.getpid()} - Jobs: {len(jobs)}")
 
-        # max_z_sample = np.max(numpy_arr, axis=0)
-        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
-        # fig, axes = plt.subplots(1, 2)
+            # Wait for all processes to finish
+            results = [job.get() for job in jobs]
 
-        # # Plot the first image
-        # axes[0].imshow(max_z_sample, cmap='gray', vmin=vmin, vmax=vmax)
-        # axes[0].set_title('Overlap')
+            # Setting variables back to init
+            curr_picked_blocks = 0
+            picked_blocks = []
 
-        # max_z_sample_non_over = np.max(non_overlap_area, axis=0)
-        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+    if curr_picked_blocks != 0:
+        print("Blocks not processed inside of loop: ", curr_picked_blocks)
+        # Assigning blocks to execution workers
+        jobs = [
+            pool.apply_async(_execute_worker, args=(picked_block,))
+            for picked_block in picked_blocks
+        ]
 
-        # # Plot the second image
-        # axes[1].imshow(max_z_sample_non_over, cmap='gray', vmin=vmin, vmax=vmax)
-        # axes[1].set_title('No overlap')
+        # Wait for all processes to finish
+        results = [job.get() for job in jobs]
 
-        # # Adjust layout to prevent overlap
-        # plt.tight_layout()
+        # Setting variables back to init
+        curr_picked_blocks = 0
+        picked_blocks = []
 
-        # # Show the plot
-        # plt.show()
+    # Closing pool of workers
+    pool.close()
 
     end_time = time.time()
 

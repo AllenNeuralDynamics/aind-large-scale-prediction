@@ -79,6 +79,133 @@ def reshape_dataset_to_prediction_chunks(
     return new_lazy_data
 
 
+def _init_super_chunks_iter(
+    lazy_data,
+    target_size_mb,
+    super_chunksize,
+    prediction_chunksize,
+    overlap_prediction_chunksize,
+) -> Tuple:
+    """
+    Initializes the super chunk slices.
+
+    If target_size_mb is not None, then this method
+    will try to estimate the best chunking size to
+    fit the provided target_size_mb value in megabytes.
+    If it's not provided, we will use the super chunk
+    size as default.
+
+    Returns
+    -------
+    Tuple[ Tuple, Tuple[Tuple], Tuple[Tuple], Generator]
+
+        new_super_chunksize [Tuple]: New super chunk size that was
+        estimated if target_size_mb was provided.
+
+        super_chunk_slices [ Tuple[Tuple] ]: Generated super chunk
+        slices using the entire volume in order to partition the array.
+
+        internal_slices [ Tuple[Tuple] ]: Generated slices per super
+        chunk using the prediction chunking.
+
+        zarr_iterator [ Generator ]: Generator of slices per dimension.
+    """
+
+    if target_size_mb is None and super_chunksize is None:
+        raise ValueError("Please, provide a target size or super chunk size.")
+
+    chunk_size_megabytes = (lazy_data.blocks[0, 0, 0].nbytes) / (1024 * 1024)
+
+    # Validating that target size is actually smaller
+    # than the total chunking size
+    if target_size_mb is not None and chunk_size_megabytes > target_size_mb:
+        raise ValueError(
+            f"Please, check your chunk size ({chunk_size_megabytes}) and target size ({target_size_mb})."
+        )
+
+    # Getting super chunks that will be sent to GPU for prediction
+    zarr_iterator = BlockedZarrArrayIterator()
+
+    # Overwriting super chunk size if target size in mb is provided
+    new_super_chunksize = super_chunksize
+    if target_size_mb and super_chunksize is None:
+
+        print(
+            f"Estimating super chunksize. Provided super chunksize: {super_chunksize} - Target MB: {target_size_mb}"
+        )
+        new_super_chunksize = zarr_iterator.get_block_shape(
+            arr=lazy_data,
+            target_size_mb=target_size_mb,
+            mode="cycle",
+        )
+
+        new_super_chunksize = _closer_to_target_chunksize(
+            super_chunksize=new_super_chunksize,
+            chunksize=prediction_chunksize,
+        )
+
+        print(
+            f"Estimated chunksize to fit in memory {target_size_mb} MiB: {new_super_chunksize}"
+        )
+
+    # Generating super chunk slices
+    super_chunk_slices = tuple(
+        zarr_iterator.gen_slices(
+            arr_shape=lazy_data.shape,
+            block_shape=new_super_chunksize,
+            overlap_shape=overlap_prediction_chunksize,  # Super chunk slices with overlap between them
+        )
+    )
+
+    local_internal_slices = None
+    global_internal_slices = None
+
+    np_overlap = np.array(overlap_prediction_chunksize) * 2
+    if np.any(np_overlap):
+        print(
+            f"Adding overlap area to super chunk size: {new_super_chunksize} - {tuple(np.array(new_super_chunksize) + np_overlap)}"
+        )
+        new_super_chunksize = tuple(np.array(new_super_chunksize) + np_overlap)
+
+        local_internal_slices = []
+        global_internal_slices = []
+
+        for sc in super_chunk_slices:
+            local_slices, global_slices = (
+                zarr_iterator.gen_over_slices_on_over_superchunks(
+                    arr_shape=lazy_data[sc].shape,
+                    block_shape=prediction_chunksize,
+                    overlap_shape=overlap_prediction_chunksize,
+                    super_chunk_slices=sc,
+                    dataset_shape=lazy_data.shape,
+                )
+            )
+            local_internal_slices.append(tuple(local_slices))
+            global_internal_slices.append(tuple(global_slices))
+
+        global_internal_slices = tuple(global_internal_slices)
+        local_internal_slices = tuple(local_internal_slices)
+
+    else:
+        local_internal_slices = tuple(
+            tuple(
+                zarr_iterator.gen_slices(
+                    arr_shape=lazy_data[super_chunk_slice].shape,
+                    block_shape=prediction_chunksize,
+                )
+            )
+            for super_chunk_slice in super_chunk_slices
+        )
+
+    return (
+        new_super_chunksize,
+        super_chunk_slices,
+        local_internal_slices,
+        global_internal_slices,
+        zarr_iterator,
+    )
+
+
 class ZarrCustomBatch:
     """
     Custom zarr batch object to manage pin memory
@@ -280,7 +407,13 @@ class ZarrSuperChunks(Dataset):
             self.internal_slices,  # Local coord system within each superchunk
             self.global_internal_slices,
             self.zarr_iterator,
-        ) = self.__init_super_chunks_iter()
+        ) = _init_super_chunks_iter(
+            lazy_data=self.lazy_data,
+            target_size_mb=self.target_size_mb,
+            super_chunksize=self.super_chunksize,
+            prediction_chunksize=self.prediction_chunksize,
+            overlap_prediction_chunksize=self.overlap_prediction_chunksize,
+        )
 
         # Initializing shared array
         (
@@ -358,135 +491,6 @@ class ZarrSuperChunks(Dataset):
         shared_array = torch.from_numpy(shared_array)
 
         return shared_array, shared_array_base
-
-    def __init_super_chunks_iter(self) -> Tuple:
-        """
-        Initializes the super chunk slices.
-
-        If target_size_mb is not None, then this method
-        will try to estimate the best chunking size to
-        fit the provided target_size_mb value in megabytes.
-        If it's not provided, we will use the super chunk
-        size as default.
-
-        Returns
-        -------
-        Tuple[ Tuple, Tuple[Tuple], Tuple[Tuple], Generator]
-
-            new_super_chunksize [Tuple]: New super chunk size that was
-            estimated if target_size_mb was provided.
-
-            super_chunk_slices [ Tuple[Tuple] ]: Generated super chunk
-            slices using the entire volume in order to partition the array.
-
-            internal_slices [ Tuple[Tuple] ]: Generated slices per super
-            chunk using the prediction chunking.
-
-            zarr_iterator [ Generator ]: Generator of slices per dimension.
-        """
-
-        if self.target_size_mb is None and self.super_chunksize is None:
-            raise ValueError(
-                "Please, provide a target size or super chunk size."
-            )
-
-        chunk_size_megabytes = (self.lazy_data.blocks[0, 0, 0].nbytes) / (
-            1024 * 1024
-        )
-
-        # Validating that target size is actually smaller
-        # than the total chunking size
-        if (
-            self.target_size_mb is not None
-            and chunk_size_megabytes > self.target_size_mb
-        ):
-            raise ValueError(
-                f"Please, check your chunk size ({chunk_size_megabytes}) and target size ({self.target_size_mb})."
-            )
-
-        # Getting super chunks that will be sent to GPU for prediction
-        zarr_iterator = BlockedZarrArrayIterator()
-
-        # Overwriting super chunk size if target size in mb is provided
-        new_super_chunksize = self.super_chunksize
-        if self.target_size_mb and self.super_chunksize is None:
-
-            print(
-                f"Estimating super chunksize. Provided super chunksize: {self.super_chunksize} - Target MB: {self.target_size_mb}"
-            )
-            new_super_chunksize = zarr_iterator.get_block_shape(
-                arr=self.lazy_data,
-                target_size_mb=self.target_size_mb,
-                mode="cycle",
-            )
-
-            new_super_chunksize = _closer_to_target_chunksize(
-                super_chunksize=new_super_chunksize,
-                chunksize=self.prediction_chunksize,
-            )
-
-            print(
-                f"Estimated chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunksize}"
-            )
-
-        # Generating super chunk slices
-        super_chunk_slices = tuple(
-            zarr_iterator.gen_slices(
-                arr_shape=self.lazy_data.shape,
-                block_shape=new_super_chunksize,
-                overlap_shape=self.overlap_prediction_chunksize,  # Super chunk slices with overlap between them
-            )
-        )
-
-        local_internal_slices = None
-        global_internal_slices = None
-
-        np_overlap = np.array(self.overlap_prediction_chunksize) * 2
-        if np.any(np_overlap):
-            print(
-                f"Adding overlap area to super chunk size: {new_super_chunksize} - {tuple(np.array(new_super_chunksize) + np_overlap)}"
-            )
-            new_super_chunksize = tuple(
-                np.array(new_super_chunksize) + np_overlap
-            )
-
-            local_internal_slices = []
-            global_internal_slices = []
-
-            for sc in super_chunk_slices:
-                local_slices, global_slices = (
-                    zarr_iterator.gen_over_slices_on_over_superchunks(
-                        arr_shape=self.lazy_data[sc].shape,
-                        block_shape=self.prediction_chunksize,
-                        overlap_shape=self.overlap_prediction_chunksize,
-                        super_chunk_slices=sc,
-                        dataset_shape=self.lazy_data.shape,
-                    )
-                )
-                local_internal_slices.append(tuple(local_slices))
-                global_internal_slices.append(tuple(global_slices))
-
-            global_internal_slices = tuple(global_internal_slices)
-            local_internal_slices = tuple(local_internal_slices)
-
-        else:
-            local_internal_slices = tuple(
-                tuple(
-                    zarr_iterator.gen_slices(
-                        arr_shape=self.lazy_data[super_chunk_slice].shape,
-                        block_shape=self.prediction_chunksize,
-                    )
-                )
-                for super_chunk_slice in super_chunk_slices
-            )
-
-        return (
-            new_super_chunksize,
-            super_chunk_slices,
-            local_internal_slices,
-            global_internal_slices,
-            zarr_iterator,
-        )
 
     def __map_index(
         self, index: int, next_batch: Optional[bool] = False
@@ -955,6 +959,7 @@ def create_data_loader(
     locked_array: Optional[bool] = True,
     overlap_prediction_chunksize: Tuple[int, ...] = None,
     logger: Optional[logging.Logger] = None,
+    manager=None,
 ):
     """
     Creates zarr data loader.
@@ -1060,8 +1065,15 @@ def create_data_loader(
         device=device,
     )
 
-    locker = multp.Lock() if n_workers else None
-    condition = multp.Condition()
+    locker = None
+    condition = None
+    if manager is not None:
+        locker = manager.Lock()
+        condition = manager.Condition()
+
+    else:
+        locker = multp.Lock() if n_workers else None
+        condition = multp.Condition()
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
@@ -1089,6 +1101,90 @@ def create_data_loader(
     )
 
     return zarr_data_loader, zarr_dataset
+
+
+def create_overlapped_slices(
+    lazy_data: ArrayLike,
+    target_size_mb: int,
+    prediction_chunksize: Tuple[int, ...],
+    super_chunksize: Optional[Tuple[int, ...]] = None,
+    overlap_prediction_chunksize: Tuple[int, ...] = None,
+):
+    """
+    Function that creates overlapped slices out.
+
+    Parameters
+    ----------
+    lazy_data: ArrayLike
+        Readed lazy data
+
+    target_size_mb: Target size in mb to place data in
+        intermediate shared memory compartment.
+
+    prediction_chunksize: Tuple[int, ...]
+        Prediction chunksize that will be pulled from the
+        data in the shared memory compartment.
+
+    super_chunksize: Tuple[int, int, int]
+        Given a lazy array (not loaded in memory),
+        this parameter determines how many chunks
+        will be moved to memory once at a time.
+        This parameter is calculated if target_size_mb
+        is provided.
+
+    overlap_prediction_chunksize: Tuple[int, ...]
+        Overlap area between chunks
+
+    Returns
+    -------
+    Tuple[ Tuple, Tuple[int, ...], Tuple[Tuple], Tuple[Tuple]]
+
+        new_super_chunksize [Tuple]: New super chunk size that was
+        estimated if target_size_mb was provided.
+
+        super_chunksize: Tuple[int, ...]: Super chunksize in memory
+
+        super_chunk_slices [ Tuple[Tuple] ]: Generated super chunk
+        slices using the entire volume in order to partition the array.
+
+        internal_slices [ Tuple[Tuple] ]: Generated slices per super
+        chunk using the prediction chunking.
+
+        global_internal_slices [ Tuple[Tuple] ]: Generated slices per super
+        chunk using the global coordinates array.
+    """
+
+    lazy_data = extract_data(lazy_data)
+    overlapped_prediction_chunksize = np.array(prediction_chunksize) + (
+        np.array(overlap_prediction_chunksize) * 2
+    )
+
+    lazy_data = reshape_dataset_to_prediction_chunks(
+        lazy_data=lazy_data,
+        prediction_chunksize=overlapped_prediction_chunksize,
+    )
+
+    (
+        super_chunksize,
+        super_chunk_slices,
+        internal_slices,  # Local coord system within each superchunk
+        global_internal_slices,
+        zarr_iterator,
+    ) = _init_super_chunks_iter(
+        lazy_data,
+        target_size_mb,
+        super_chunksize,
+        prediction_chunksize,
+        overlap_prediction_chunksize,
+    )
+
+    return (
+        lazy_data,
+        super_chunksize,
+        super_chunk_slices,
+        internal_slices,
+        global_internal_slices,
+    )
 
 
 def main():
