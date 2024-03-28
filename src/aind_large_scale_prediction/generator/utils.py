@@ -543,7 +543,7 @@ def unpad_global_coords(
 
 
 def concatenate_lazy_data(
-    dataset_paths: List[PathLike], multiscale: str, concat_axis: int
+    dataset_paths: List[PathLike], multiscales: List[str], concat_axis: int
 ) -> ArrayLike:
     """
     Concatenates lazy datasets in a given axis.
@@ -554,8 +554,8 @@ def concatenate_lazy_data(
         List of datasets that will be concatenated
         in a given axis.
 
-    multiscale: str
-        Multiscale we are going to load for all channels.
+    multiscale: List[str]
+        Multiscales we are going to load for all channels.
 
     concat_axis: int
         Concatenation axis.
@@ -569,12 +569,12 @@ def concatenate_lazy_data(
     lazy_datasets = [
         ImageReaderFactory()
         .create(
-            data_path=dataset_path,
+            data_path=dataset_paths[idx],
             parse_path=False,
-            multiscale=multiscale,
+            multiscale=multiscales[idx],
         )
         .as_dask_array()
-        for dataset_path in dataset_paths
+        for idx in range(len(dataset_paths))
     ]
 
     # It will indirectly raise an error if shapes

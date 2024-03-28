@@ -6,7 +6,7 @@ and the available metrics
 import os
 from abc import ABC, abstractmethod, abstractproperty
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import dask.array as da
 import imageio as iio
@@ -21,7 +21,7 @@ from skimage.io import imread as sk_imread
 
 from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 
-from .utils import add_leading_dim
+from .utils import add_leading_dim, read_json_as_dict
 
 
 class ImageReader(ABC):
@@ -73,6 +73,18 @@ class ImageReader(ABC):
         np.ndarray
             Numpy array with the image
 
+        """
+        pass
+
+    @abstractmethod
+    def metadata(self) -> Dict:
+        """
+        Abstract method that return the image metadata.
+
+        Returns
+        -------
+        Dict
+            Dictionary with image metadata
         """
         pass
 
@@ -232,6 +244,37 @@ class OMEZarrReader(ImageReader):
         """
         return zarr.open(self.data_path, "r")[:]
 
+    def metadata(self) -> Dict:
+        """
+        Returns the image metadata.
+
+        Returns
+        -------
+        Dict
+            Dictionary with image metadata
+        """
+        metadata = {}
+        # Removing multiscale to path
+        if isinstance(self.data_path, str):
+            data_path = Path(self.data_path)
+
+        zattrs_metadata = ""
+        zarray_metadata = ""
+        # Checking inside and outside of folder due to dimension separator "." or "/"
+        for path in [data_path, data_path.parent]:
+            if path.joinpath(".zattrs").exists():
+                zattrs_metadata = path.joinpath(".zattrs")
+
+            if path.joinpath(".zarray").exists():
+                zarray_metadata = path.joinpath(".zarray")
+
+        print(f"Reading metadata from {zattrs_metadata} and {zarray_metadata}")
+
+        metadata[".zattrs"] = read_json_as_dict(zattrs_metadata)
+        metadata[".zarray"] = read_json_as_dict(zarray_metadata)
+
+        return metadata
+
     def close_handler(self) -> None:
         """
         Method to close the image hander when it's necessary.
@@ -336,6 +379,22 @@ class TiffReader(ImageReader):
         chunk_size = tuple((d,) for d in shape)
 
         return Array(dask_arr, name, chunk_size, dtype)
+
+    def metadata(self) -> Dict:
+        """
+        Returns the image metadata.
+
+        Returns
+        -------
+        Dict
+            Dictionary with image metadata
+        """
+        metadata = {}
+        with pims.open(data_path) as imgs:
+            metadata["shape"] = (1,) + (len(imgs),) + imgs.frame_shape
+            metadata["dtype"] = np.dtype(imgs.pixel_type)
+
+        return metadata
 
     def as_numpy_array(self) -> np.ndarray:
         """
@@ -472,6 +531,21 @@ class PngReader(ImageReader):
             shape = (len(imgs),) + imgs.frame_shape
 
         return shape
+
+    def metadata(self) -> Dict:
+        """
+        Returns the image metadata.
+
+        Returns
+        -------
+        Dict
+            Dictionary with image metadata
+        """
+        metadata = {}
+        with pims.open(data_path) as imgs:
+            metadata["shape"] = (len(imgs),) + imgs.frame_shape
+
+        return metadata
 
     @property
     def chunks(self) -> Tuple:

@@ -2,6 +2,8 @@
 Utility functions for image readers
 """
 
+import json
+import os
 from typing import Optional
 
 from aind_large_scale_prediction._shared.types import ArrayLike
@@ -75,3 +77,30 @@ def extract_data(
         dynamic_indices[idx] = 0
 
     return arr[tuple(dynamic_indices)]
+
+
+def read_json_as_dict(filepath: str) -> dict:
+    """
+    Reads a json as dictionary.
+
+    Parameters
+    ------------------------
+
+    filepath: PathLike
+        Path where the json is located.
+
+    Returns
+    ------------------------
+
+    dict:
+        Dictionary with the data the json has.
+
+    """
+
+    dictionary = {}
+
+    if os.path.exists(filepath):
+        with open(filepath) as json_file:
+            dictionary = json.load(json_file)
+
+    return dictionary
