@@ -619,16 +619,33 @@ class ZarrSuperChunks(Dataset):
                 constant_values=0,
             )
 
-            self.super_chunk_in_memory[:] = torch.from_numpy(
-                padded_lazy_data.compute()
-            )
+            try:
+                self.super_chunk_in_memory[:] = torch.from_numpy(
+                    padded_lazy_data.compute()
+                )
+
+            except ValueError as e:
+                print(
+                    f"Slices: {curr_super_chunk_slices} Lazy data shape: {self.lazy_data[curr_super_chunk_slices].shape} - pad width: {pad_width} - Padded lazy: {padded_lazy_data.shape}"
+                )
+                raise e
 
         else:
-            self.super_chunk_in_memory[:] = torch.from_numpy(
-                self.lazy_data[
-                    self.super_chunk_slices[self.curr_super_chunk_pos.value]
-                ].compute()
-            )
+            try:
+
+                self.super_chunk_in_memory[:] = torch.from_numpy(
+                    self.lazy_data[
+                        self.super_chunk_slices[
+                            self.curr_super_chunk_pos.value
+                        ]
+                    ].compute()
+                )
+
+            except ValueError as e:
+                print(
+                    f"Slices: {self.super_chunk_slices[self.curr_super_chunk_pos.value]} Lazy data shape: {self.lazy_data[self.super_chunk_slices[self.curr_super_chunk_pos.value]].shape}"
+                )
+                raise e
 
     def __parallel_get_item(self, index: int) -> torch.Tensor:
         """
