@@ -624,7 +624,7 @@ class ZarrSuperChunks(Dataset):
                     padded_lazy_data.compute()
                 )
 
-            except ValueError as e:
+            except Exception as e:
                 print(
                     f"Slices: {curr_super_chunk_slices} Lazy data shape: {self.lazy_data[curr_super_chunk_slices].shape} - pad width: {pad_width} - Padded lazy: {padded_lazy_data.shape}"
                 )
