@@ -72,23 +72,24 @@ def main():
         pin_memory = False
         multiprocessing.set_start_method("spawn", force=True)
 
-    dataset_path = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_405.zarr"
-    nuclear_channel = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_3.zarr"
+    # dataset_path = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_405.zarr"
+    # nuclear_channel = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_3.zarr"
     # "s3://aind-open-data/SmartSPIM_709392_2024-01-29_18-33-39_stitched_2024-02-04_12-45-58/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
     # "s3://aind-open-data/HCR_681417-Easy-GFP_2023-11-10_13-45-01_fused_2024-01-09_13-16-14/channel_561.zarr"
+    exaspim_test = "s3://aind-open-data/exaSPIM_653158_2023-06-01_20-41-38_fusion_2023-06-12_11-58-05/fused.zarr"
 
-    multiscale = "3"
+    multiscale = "4"
     target_size_mb = 1024
     n_workers = 16
     batch_size = 1
-    prediction_chunksize = (2, 128, 128, 128)
-    overlap_prediction_chunksize = (0, 30, 30, 30)
-    super_chunksize = (2, 512, 512, 512)
+    prediction_chunksize = (128, 128, 128)
+    overlap_prediction_chunksize = (30, 30, 30)
+    super_chunksize = (512, 512, 512)
     logger = create_logger(output_log_path=".")
 
     lazy_data = concatenate_lazy_data(
-        dataset_paths=[dataset_path, nuclear_channel],
-        multiscale=multiscale,
+        dataset_paths=[exaspim_test],
+        multiscales=[multiscale],
         concat_axis=-4,
     )
 
@@ -136,7 +137,7 @@ def main():
         np.array(overlap_prediction_chunksize) * 2
     )
 
-    output_zarr_path = "./test_dataset.zarr"
+    output_zarr_path = "./test_data.zarr"
     output_zarr = zarr.open(
         output_zarr_path,
         "w",
