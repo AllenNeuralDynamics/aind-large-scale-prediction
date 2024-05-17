@@ -1,5 +1,7 @@
 # aind-large-scale-prediction
 
+This package allows the iteration of a zarr dataset in chunks. It provides the global coordinate of each pulled chunk and also allows overlapping areas.
+
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 ![Code Style](https://img.shields.io/badge/code%20style-black-black)
 [![semantic-release: angular](https://img.shields.io/badge/semantic--release-angular-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
