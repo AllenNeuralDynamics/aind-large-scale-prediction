@@ -5,7 +5,6 @@ a dataloader could be created
 
 import logging
 import multiprocessing
-import os
 import time
 from datetime import datetime
 
@@ -40,7 +39,7 @@ def create_logger(output_log_path: str) -> logging.Logger:
         Created logger pointing to
         the file path.
     """
-    CURR_DATE_TIME = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    # CURR_DATE_TIME = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     LOGS_FILE = f"{output_log_path}/large_scale.log"  # _{CURR_DATE_TIME}
 
     logging.basicConfig(
@@ -121,6 +120,8 @@ def main():
         drop_last=False,
         override_suggested_cpus=False,
         locked_array=True,
+        shuffle=True,
+        seed=42,
     )
     end_time = time.time()
 
@@ -133,9 +134,9 @@ def main():
         overlap_per_axis=overlap_prediction_chunksize,
     )
 
-    prediction_chunksize_overlap = np.array(prediction_chunksize) + (
-        np.array(overlap_prediction_chunksize) * 2
-    )
+    # prediction_chunksize_overlap = np.array(prediction_chunksize) + (
+    #     np.array(overlap_prediction_chunksize) * 2
+    # )
 
     output_zarr_path = "./test_data.zarr"
     output_zarr = zarr.open(
@@ -203,33 +204,41 @@ def main():
         )
 
         non_overlap_area = data_block[unpadded_local_slice]
+        print(
+            "Non overlap area: ",
+            non_overlap_area.shape,
+            " Global slice: ",
+            unpadded_global_slice,
+        )
 
-        output_zarr[unpadded_global_slice] = non_overlap_area
+        # output_zarr[unpadded_global_slice] = non_overlap_area
 
         logger.info(
             f"Block shape: {data_block.shape} - nonoverlap area: {non_overlap_area.shape}"
         )
 
-        # max_z_sample = np.max(numpy_arr, axis=0)
-        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
-        # fig, axes = plt.subplots(1, 2)
+        max_z_sample = np.max(data_block, axis=0)
+        vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+        fig, axes = plt.subplots(1, 2)
 
-        # # Plot the first image
-        # axes[0].imshow(max_z_sample, cmap='gray', vmin=vmin, vmax=vmax)
-        # axes[0].set_title('Overlap')
+        # Plot the first image
+        axes[0].imshow(max_z_sample, cmap="gray", vmin=vmin, vmax=vmax)
+        axes[0].set_title("Overlap")
 
-        # max_z_sample_non_over = np.max(non_overlap_area, axis=0)
-        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+        max_z_sample_non_over = np.max(non_overlap_area, axis=0)
+        vmin, vmax = np.percentile(max_z_sample_non_over, (0.1, 98))
 
-        # # Plot the second image
-        # axes[1].imshow(max_z_sample_non_over, cmap='gray', vmin=vmin, vmax=vmax)
-        # axes[1].set_title('No overlap')
+        # Plot the second image
+        axes[1].imshow(
+            max_z_sample_non_over, cmap="gray", vmin=vmin, vmax=vmax
+        )
+        axes[1].set_title("No overlap")
 
-        # # Adjust layout to prevent overlap
-        # plt.tight_layout()
+        # Adjust layout to prevent overlap
+        plt.tight_layout()
 
-        # # Show the plot
-        # plt.show()
+        # Show the plot
+        plt.show()
 
     end_time = time.time()
 

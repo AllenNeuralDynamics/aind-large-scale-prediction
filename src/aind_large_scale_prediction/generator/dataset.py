@@ -7,6 +7,7 @@ import logging
 import time
 from functools import partial
 from typing import Callable, List, Optional, Tuple
+import random
 
 import dask.array as da
 import numpy as np
@@ -213,6 +214,8 @@ class ZarrSuperChunks(Dataset):
         locker: Callable[[int], Callable] = None,
         condition: Callable = None,
         locked_array: Optional[bool] = True,
+        shuffle: Optional[bool] = False,
+        seed: Optional[int] = 42
     ) -> None:
         """
         Initializes the dataset class
@@ -254,6 +257,13 @@ class ZarrSuperChunks(Dataset):
             If we want the shared memory array to be
             locked for access.
             Default: True
+
+        shuffle: Optional[bool]
+            If we want to shuffle the blocks. Useful if we are training
+            deep neural networks.
+        
+        seed: Optional[int]
+            Seed for random package. Useful for reproducibility.
         """
         super(ZarrSuperChunks, self).__init__()
 
@@ -267,6 +277,8 @@ class ZarrSuperChunks(Dataset):
         self.prediction_chunksize = prediction_chunksize
         self.overlap_prediction_chunksize = overlap_prediction_chunksize
         self.target_size_mb = target_size_mb
+        self.shuffle = shuffle
+        self.seed = seed
 
         # Multiprocessing variables
         self.locker = locker
@@ -430,13 +442,21 @@ class ZarrSuperChunks(Dataset):
             )
 
         # Generating super chunk slices
-        super_chunk_slices = tuple(
+        super_chunk_slices = list(
             zarr_iterator.gen_slices(
                 arr_shape=self.lazy_data.shape,
                 block_shape=new_super_chunksize,
                 overlap_shape=self.overlap_prediction_chunksize,  # Super chunk slices with overlap between them
             )
         )
+
+        # Shuffling slices if needed
+        if self.shuffle:
+            # setting seed
+            random.seed(self.seed)
+            random.shuffle(super_chunk_slices)
+        
+        super_chunk_slices = tuple(super_chunk_slices)
 
         local_internal_slices = None
         global_internal_slices = None
@@ -470,7 +490,7 @@ class ZarrSuperChunks(Dataset):
             local_internal_slices = tuple(local_internal_slices)
 
         else:
-            local_internal_slices = tuple(
+            local_internal_slices = list(
                 tuple(
                     zarr_iterator.gen_slices(
                         arr_shape=self.lazy_data[super_chunk_slice].shape,
@@ -479,6 +499,28 @@ class ZarrSuperChunks(Dataset):
                 )
                 for super_chunk_slice in super_chunk_slices
             )
+
+        # Shuffling internal positions inside superchunk
+        if self.shuffle and local_internal_slices:
+            internal_positions = list(
+                range(
+                    len(local_internal_slices)
+                )
+            )
+
+            random.shuffle(internal_positions)
+
+            local_internal_slices = tuple([
+                local_internal_slices[random_pos]
+                for random_pos in internal_positions
+            ])
+
+            if global_internal_slices:
+
+                global_internal_slices = tuple([
+                    global_internal_slices[random_pos]
+                    for random_pos in internal_positions
+                ])
 
         return (
             new_super_chunksize,
@@ -971,6 +1013,8 @@ def create_data_loader(
     drop_last: Optional[bool] = True,
     locked_array: Optional[bool] = True,
     overlap_prediction_chunksize: Tuple[int, ...] = None,
+    shuffle=False,
+    seed=42,
     logger: Optional[logging.Logger] = None,
 ):
     """
@@ -1089,6 +1133,8 @@ def create_data_loader(
         locker=locker,
         condition=condition,
         locked_array=locked_array,
+        shuffle=shuffle,
+        seed=seed,
     )
 
     persistent_workers = True if n_workers else False

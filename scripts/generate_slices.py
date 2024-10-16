@@ -211,7 +211,7 @@ def eval_loading_chunks_directly(
 
 
 if __name__ == "__main__":
-    import cProfile
+    # import cProfile
 
     (
         dataset_lazy_data,
