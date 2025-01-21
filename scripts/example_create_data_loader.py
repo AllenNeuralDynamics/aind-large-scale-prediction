@@ -11,6 +11,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
+import tifffile
 
 from aind_large_scale_prediction.generator.dataset import create_data_loader
 from aind_large_scale_prediction.generator.utils import (
@@ -73,7 +74,19 @@ def main():
 
     # dataset_path = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_405.zarr"
     # nuclear_channel = "s3://aind-open-data/HCR_BL6-000_2023-06-1_00-00-00_fused_2024-02-09_13-28-49/channel_3.zarr"
-    dataset_path = "s3://aind-open-data/SmartSPIM_709392_2024-01-29_18-33-39_stitched_2024-02-04_12-45-58/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
+    dataset_path = "s3://aind-open-data/SmartSPIM_729674_2024-12-16_12-16-28_stitched_2024-12-18_07-35-30/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr"
+        
+    # Zarr datasets for brain segmentation
+    # "s3://aind-open-data/SmartSPIM_729533_2024-04-25_19-50-03_stitched_2024-04-26_22-23-03/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr"
+    # "s3://aind-open-data/SmartSPIM_698928_2023-10-03_04-48-54_stitched_2024-11-12_18-16-50/image_tile_fusing/OMEZarr/Ex_639_Em_660.zarr"
+    # "s3://aind-open-data/SmartSPIM_757189_2024-10-04_20-23-18_stitched_2024-10-06_01-58-36/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
+    # "s3://aind-open-data/SmartSPIM_727461_2024-06-13_17-51-59_stitched_2024-07-10_12-51-00/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
+    # "s3://aind-open-data/SmartSPIM_728443_2024-06-21_18-31-02_stitched_2024-07-13_00-28-27/image_tile_fusing/OMEZarr/Ex_639_Em_667.zarr"
+
+    # dataset_path = "s3://aind-open-data/HCR_742354_2024-08-10_21-00-00/fused/channel_405.zarr"
+    output_zarr_path = "./SmartSPIM_729674_Ex_639_Em_680.zarr"
+    tiff_path = "./SmartSPIM_729674_Ex_639_Em_680.tif"
+
     # "s3://aind-open-data/HCR_681417-Easy-GFP_2023-11-10_13-45-01_fused_2024-01-09_13-16-14/channel_561.zarr"
     # exaspim_test = "s3://aind-open-data/exaSPIM_653158_2023-06-01_20-41-38_fusion_2023-06-12_11-58-05/fused.zarr"
 
@@ -82,7 +95,7 @@ def main():
     n_workers = 16
     batch_size = 1
     prediction_chunksize = (128, 128, 128)
-    overlap_prediction_chunksize = (30, 30, 30)
+    overlap_prediction_chunksize = (0, 0, 0)#(30, 30, 30)
     super_chunksize = (512, 512, 512)
     logger = create_logger(output_log_path=".")
 
@@ -120,7 +133,7 @@ def main():
         drop_last=False,
         override_suggested_cpus=False,
         locked_array=True,
-        shuffle=True,
+        shuffle=False,
         seed=42,
     )
     end_time = time.time()
@@ -138,7 +151,6 @@ def main():
     #     np.array(overlap_prediction_chunksize) * 2
     # )
 
-    output_zarr_path = "./test_data.zarr"
     output_zarr = zarr.open(
         output_zarr_path,
         "w",
@@ -204,45 +216,49 @@ def main():
         )
 
         non_overlap_area = data_block[unpadded_local_slice]
-        print(
-            "Non overlap area: ",
-            non_overlap_area.shape,
-            " Global slice: ",
-            unpadded_global_slice,
-        )
+        # print(
+        #     "Non overlap area: ",
+        #     non_overlap_area.shape,
+        #     " Global slice: ",
+        #     unpadded_global_slice,
+        # )
 
-        # output_zarr[unpadded_global_slice] = non_overlap_area
+        output_zarr[unpadded_global_slice] = non_overlap_area
 
-        logger.info(
-            f"Block shape: {data_block.shape} - nonoverlap area: {non_overlap_area.shape}"
-        )
+        # logger.info(
+        #     f"Block shape: {data_block.shape} - nonoverlap area: {non_overlap_area.shape}"
+        # )
 
-        max_z_sample = np.max(data_block, axis=0)
-        vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
-        fig, axes = plt.subplots(1, 2)
+        # max_z_sample = np.max(data_block, axis=0)
+        # vmin, vmax = np.percentile(max_z_sample, (0.1, 98))
+        # fig, axes = plt.subplots(1, 2)
 
-        # Plot the first image
-        axes[0].imshow(max_z_sample, cmap="gray", vmin=vmin, vmax=vmax)
-        axes[0].set_title("Overlap")
+        # # Plot the first image
+        # axes[0].imshow(max_z_sample, cmap="gray", vmin=vmin, vmax=vmax)
+        # axes[0].set_title("Overlap")
 
-        max_z_sample_non_over = np.max(non_overlap_area, axis=0)
-        vmin, vmax = np.percentile(max_z_sample_non_over, (0.1, 98))
+        # max_z_sample_non_over = np.max(non_overlap_area, axis=0)
+        # vmin, vmax = np.percentile(max_z_sample_non_over, (0.1, 98))
 
-        # Plot the second image
-        axes[1].imshow(
-            max_z_sample_non_over, cmap="gray", vmin=vmin, vmax=vmax
-        )
-        axes[1].set_title("No overlap")
+        # # Plot the second image
+        # axes[1].imshow(
+        #     max_z_sample_non_over, cmap="gray", vmin=vmin, vmax=vmax
+        # )
+        # axes[1].set_title("No overlap")
 
-        # Adjust layout to prevent overlap
-        plt.tight_layout()
+        # # Adjust layout to prevent overlap
+        # plt.tight_layout()
 
-        # Show the plot
-        plt.show()
+        # # Show the plot
+        # plt.show()
 
     end_time = time.time()
 
     logger.info(f"Time going through data loader: {end_time - start_time}")
+
+    if tiff_path is not None:
+        zarr_data = zarr.open(output_zarr_path, mode='r')
+        tifffile.imwrite(tiff_path, zarr_data[:].astype(np.uint16), dtype=np.uint16)
 
 
 if __name__ == "__main__":
