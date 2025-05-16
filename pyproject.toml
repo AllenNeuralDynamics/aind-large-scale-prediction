@@ -18,7 +18,7 @@ dynamic = ["version"]
 
 dependencies = [
     'ome-zarr==0.8.3',
-    'numpy==1.26.4',
+    'numpy>=1.26.4',
     'zarr==2.18.0',
     'scikit-learn==1.4.2',
     'pims==0.6.1',
@@ -26,7 +26,7 @@ dependencies = [
     'tifffile==2024.5.10',
     'dask[distributed]==2024.4.1',
     'dask_image==2023.8.1',
-    'torch==2.2.2'
+    'torch>=2.2.2'
 ]
 
 [project.optional-dependencies]
