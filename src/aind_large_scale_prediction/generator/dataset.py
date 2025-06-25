@@ -27,7 +27,14 @@ from aind_large_scale_prediction.generator.zarr_slice_generator import (
     _closer_to_target_chunksize,
 )
 from aind_large_scale_prediction.io.utils import extract_data
-
+from aind_large_scale_prediction.generator.utils import (
+    recover_global_position,
+    unpad_global_coords,
+)
+import fsspec
+import re
+import zarr
+import math
 
 def reshape_dataset_to_prediction_chunks(
     lazy_data: ArrayLike, prediction_chunksize: Tuple[int, ...]
@@ -129,6 +136,72 @@ class ZarrCustomBatch:
         return self
 
 
+class ZarrMultiScaleBatch:
+    """
+    Custom zarr batch object to manage pin memory
+    """
+
+    def __init__(
+        self,
+        high_resolution: List[torch.Tensor],
+        low_resolution: List[torch.Tensor],
+        batch_high_res_super_chunk: List[Tuple[int]],
+        batch_high_res_internal_slice: List[Tuple[int]],
+        batch_high_res_internal_slice_global: List[Tuple[int]],
+        batch_low_res_padded_position: List[Tuple[int]],
+        batch_low_res_unpadded_position: List[Tuple[int]],
+        exaltation_wavelength: int,
+        high_scale_resolution: int,
+        low_scale_resolution: int,
+        device: Optional[torch.cuda.Device] = None,
+    ):
+        """
+        Init method
+
+        Parameters
+        ----------
+        high_resolution: List[torch.Tensor]
+            Batched image data given by the
+            data loader.
+
+        batch_super_chunk: List[Tuple[int]]
+            Slices for the current super chunk
+
+        batch_internal_slice: List[Tuple[int]]
+            Slices for the internal slices within
+            the pulled super chunk
+
+        device: Optional[torch.cuda.Device]
+            Device where the data will be placed.
+            Default: None
+
+        """
+        self.high_resolution = torch.stack(high_resolution)
+        self.low_resolution = torch.stack(low_resolution)
+
+        self.high_res_super_chunk = tuple(batch_high_res_super_chunk)
+        self.high_res_internal_slice = tuple(batch_high_res_internal_slice)
+        self.high_res_global_posiiton = tuple(batch_high_res_internal_slice_global)
+        self.low_res_padded_position = tuple(batch_low_res_padded_position)
+        self.low_res_unpadded_position = tuple(batch_low_res_unpadded_position)
+
+        self.exaltation_wavelength = exaltation_wavelength
+        self.high_scale_resolution = high_scale_resolution
+        self.low_scale_resolution = low_scale_resolution
+
+        if device is not None:
+            self.high_resolution = self.high_resolution.to(device, non_blocking=True)
+            self.low_resolution = self.low_resolution.to(device, non_blocking=True)
+
+    def pin_memory(self):
+        """
+        Custom pin memory for GPU loading optimization
+        """
+        self.high_resolution = self.high_resolution.pin_memory()
+        self.high_resolution = self.high_resolution.pin_memory()
+
+        return self
+
 def collate_fn(
     dataloader_return: Tuple,
     device: Optional[torch.cuda.Device] = None,
@@ -158,6 +231,10 @@ def collate_fn(
 
     for item in dataloader_return:
         batch_item = item[0]
+        
+        if batch_item is None:
+            continue
+
         batch_super_chunk.append(item[1])
         batch_internal_slice.append(item[2])
         batch_internal_slice_global.append(item[3])
@@ -186,6 +263,10 @@ def collate_fn(
 
         batch_tensor.append(batch_item)
 
+    if len(batch_tensor) == 0:
+        # If no data was pulled, return empty batch
+        return None
+
     return ZarrCustomBatch(
         batch_tensor=batch_tensor,
         batch_super_chunk=batch_super_chunk,
@@ -213,6 +294,7 @@ class ZarrSuperChunks(Dataset):
         locker: Callable[[int], Callable] = None,
         condition: Callable = None,
         locked_array: Optional[bool] = True,
+        masked_data_dimension: Optional[int] = None,
     ) -> None:
         """
         Initializes the dataset class
@@ -263,6 +345,12 @@ class ZarrSuperChunks(Dataset):
             )
         # Lazy data after extraction. e.g., (1, 1, 1024, 512, 512) -> (1024, 512, 512)
         self.lazy_data = extract_data(lazy_data)
+
+        # Use if lazy data comes with an extra dimension for masking
+        self.masked_data_dimension = masked_data_dimension
+
+        # self.valid_internal_chunks = {}
+
         self.super_chunksize = super_chunksize
         self.prediction_chunksize = prediction_chunksize
         self.overlap_prediction_chunksize = overlap_prediction_chunksize
@@ -843,6 +931,21 @@ class ZarrSuperChunks(Dataset):
                 current_internal_slice_global,
             ) = self.__parallel_get_item(index)
 
+        # Getting data only in masked area
+        if self.masked_data_dimension is not None:
+            nonzero_elements = np.count_nonzero(
+                pulled_prediction_chunk[self.masked_data_dimension]
+            )
+            total_elements_per_image = np.prod(pulled_prediction_chunk.shape[-3:])
+            percentage_nonzero = (nonzero_elements / total_elements_per_image)
+            keep_image = percentage_nonzero >= 0.3
+
+            if not keep_image:
+                pulled_prediction_chunk = None
+            # else:
+            #     self.valid_internal_chunks[index].append(current_internal_slice)
+
+        # If no data was pulled, return None
         return (
             pulled_prediction_chunk,
             curr_super_chunk_position,
@@ -872,6 +975,330 @@ class ZarrSuperChunks(Dataset):
         self.super_chunk_in_memory = None
         self.array_pointer = None
 
+# def downscale_slice(s: slice, factor: int, levels: int):
+#     factor = factor ** levels
+#     if s.start is None or s.stop is None:
+#         raise ValueError("Upscaling requires explicit start and stop in slices.")
+#     return slice(int(s.start / factor), int(s.stop / factor))
+
+def downscale_slice(s: slice, factor: int, levels: int) -> slice:
+    if s.start is None or s.stop is None:
+        raise ValueError("Downscaling requires explicit start and stop in slices.")
+    
+    scale = factor ** levels
+
+    start = math.floor(s.start / scale)
+    stop  = math.ceil(s.stop / scale)
+
+    return slice(start, stop)
+
+def extract_roi_chunked(downsampled_lazy, downsampled_slices, desired_shape):
+    # print("down slices: ", downsampled_slices)
+    # Getting center from the start and end slices
+    zc = (downsampled_slices[0].start + downsampled_slices[0].stop) // 2
+    yc = (downsampled_slices[1].start + downsampled_slices[1].stop) // 2
+    xc = (downsampled_slices[2].start + downsampled_slices[2].stop) // 2
+
+    # print(zc, yc, xc)
+    # getting the desider shape of the chunk, should be same as network
+    sz, sy, sx = desired_shape
+    # print("desired shape: ", desired_shape)
+    half_sz, half_sy, half_sx = sz // 2, sy // 2, sx // 2
+    # print("Halfs ", half_sz, half_sy, half_sx)
+
+    # Compute desired slice ranges
+    z0, z1 = zc - half_sz, zc + half_sz
+    y0, y1 = yc - half_sy, yc + half_sy
+    x0, x1 = xc - half_sx, xc + half_sx
+
+    # print(f"New ranges ({z0}, {z1}) - ({y0}, {y1}) - ({x0}, {x1})")
+    
+    # Getting shape of the whole volume, to make sure borders are padded
+    shape_z, shape_y, shape_x = downsampled_lazy.shape[-3:]
+
+    z0_valid, z1_valid = max(0, z0), min(shape_z, z1)
+    y0_valid, y1_valid = max(0, y0), min(shape_y, y1)
+    x0_valid, x1_valid = max(0, x0), min(shape_x, x1)
+
+    # print(f"Valid New ranges ({z0_valid}, {z1_valid}) - ({y0_valid}, {y1_valid}) - ({x0_valid}, {x1_valid})")
+    
+    # Crop the valid portion
+    cropped = np.squeeze(
+        downsampled_lazy[
+            ...,
+            z0_valid:z1_valid,
+            y0_valid:y1_valid,
+            x0_valid:x1_valid
+        ].compute()
+    )
+
+    # Compute how much padding is needed on each side
+    pad_z = (z0_valid - z0, z1 - z1_valid)
+    pad_y = (y0_valid - y0, y1 - y1_valid)
+    pad_x = (x0_valid - x0, x1 - x1_valid)
+
+    # print(pad_z, pad_y, pad_x)
+    
+    # Pad to match target size
+    padded = np.pad(
+        cropped,
+        pad_width=(pad_z, pad_y, pad_x),
+        mode='constant',
+        constant_values=0
+    )
+    final_slices = (
+        slice(None),
+        slice(None),
+        slice(z0_valid, z1_valid),
+        slice(y0_valid, y1_valid),
+        slice(x0_valid, x1_valid),
+    )
+
+    return padded, final_slices
+
+def read_top_level_zattrs(zarr_path, anon=True):
+    # Remove the pyramid level if present (e.g., /2)
+    if zarr_path.endswith('/'):
+        zarr_path = zarr_path[:-1]
+    parts = zarr_path.split('/')
+    if parts[-1].isdigit():
+        top_level_path = '/'.join(parts[:-1])
+    else:
+        top_level_path = zarr_path
+
+    mapper = fsspec.get_mapper(top_level_path, anon=anon)
+    group = zarr.open_group(mapper, mode='r')
+    zattrs = group.attrs.asdict()
+    return zattrs
+
+def get_resolution(zattrs, level):
+    level = str(level)
+    datasets = zattrs["multiscales"][0]['datasets']
+    for dset in datasets:
+        if dset['path'] == level:
+            return dset['coordinateTransformations'][0]['scale'][-3:]
+
+    return None
+
+def extract_wavelengths(zarr_path):
+    match = re.search(r'Ex_(\d+)_Em_(\d+)\.zarr', zarr_path)
+    if match:
+        ex_wl = int(match.group(1))
+        em_wl = int(match.group(2))
+        return ex_wl, em_wl
+    
+    return None
+
+def collate_fn_multiscale(
+    dataloader_return: Tuple,
+    device: Optional[torch.cuda.Device] = None,
+):
+    """
+    Collate function to deal with pulled chunks
+
+    Parameters
+    ----------
+    dataloader_return: Tuple
+        Tuple with the array data,
+        super chunk positions and current internal
+        slices for the batched data.
+
+    Returns:
+    torch.Tensor
+        Returns the batch in a tensor format
+    """
+    
+    len_chunks = len(dataloader_return[0][2])
+
+    # batch_tensor
+    high_res_tensor = []
+    high_res_batch_super_chunk = []
+    high_res_batch_internal_slice = []
+    high_res_batch_internal_slice_global = []
+    low_res_tensor = []
+    padded_low_res_internal_slice = []
+    unpadded_low_res_internal_slice = []
+
+    for item in dataloader_return:
+        batch_item = item[0]
+        
+        if batch_item is None:
+            continue
+
+        low_res_tensor.append(item[1])
+        high_res_batch_super_chunk.append(item[2])
+        high_res_batch_internal_slice.append(item[3])
+        high_res_batch_internal_slice_global.append(item[4])
+        padded_low_res_internal_slice.append(item[5])
+        unpadded_low_res_internal_slice.append(item[6])
+
+        prediction_chunksize = tuple(
+            [slice_obj.stop - slice_obj.start for slice_obj in item[3]]
+        )
+
+        if isinstance(batch_item, np.ndarray):
+            batch_item = torch.from_numpy(batch_item)
+
+        if batch_item.shape != prediction_chunksize:
+            # n-dim slices - batches 2D - 3D data
+            min_slices = tuple(
+                slice(0, min(prediction_chunksize[idx], batch_item.shape[idx]))
+                for idx in range(len_chunks)
+            )
+
+            zeros = torch.zeros(
+                size=prediction_chunksize, dtype=batch_item.dtype
+            )
+
+            # Filling zeros array with batch data
+            zeros[min_slices] = batch_item[min_slices]
+            batch_item = zeros
+
+        high_res_tensor.append(batch_item)
+
+    if len(high_res_tensor) == 0:
+        # If no data was pulled, return empty batch
+        return None
+
+    return ZarrMultiScaleBatch(
+        high_resolution=high_res_tensor,
+        low_resolution=low_res_tensor,
+        batch_high_res_super_chunk=high_res_batch_super_chunk,
+        batch_high_res_internal_slice=high_res_batch_internal_slice,
+        batch_high_res_internal_slice_global=high_res_batch_internal_slice_global,
+        batch_low_res_padded_position=padded_low_res_internal_slice,
+        batch_low_res_unpadded_position=unpadded_low_res_internal_slice,
+        exaltation_wavelength=dataloader_return[0][7],
+        high_scale_resolution=dataloader_return[0][8],
+        low_scale_resolution=dataloader_return[0][9],
+    )
+
+class MultiScaleZarrDataset(ZarrSuperChunks):
+    def __init__(
+        self,
+        dataset_path: str,
+        high_res_scale: str,
+        low_res_scale: str,
+        scale_factors: Tuple[int, int, int],
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.dataset_path = dataset_path
+        self.high_res_scale = int(high_res_scale)
+        self.low_res_scale = int(low_res_scale)
+        self.scale_factors = scale_factors
+        self.downsampled_lazy_data = da.squeeze(
+            da.from_zarr(
+                f"{dataset_path}/{low_res_scale}",
+            )
+        )
+
+        # Extracting the wavelength from the dataset path
+        ex, em = extract_wavelengths(dataset_path)
+        self.exaltation_wavelength = ex
+        self.emission_wavelength = em
+
+        # Reading zattrs
+        zattrs = read_top_level_zattrs(dataset_path, anon=True)
+        self.high_scale_resolution = get_resolution(zattrs, high_res_scale)
+        self.low_scale_resolution = get_resolution(zattrs, low_res_scale)
+
+    def __get_low_res_data(
+        self,
+        current_internal_slice_global: Tuple[slice]
+    ) -> Tuple[torch.Tensor, Tuple[slice]]:
+        """
+        Retrieves the low resolution data based on the
+        current internal slice global coordinates.
+
+        Parameters
+        ----------
+        current_internal_slice_global: Tuple[slice]
+            Global coordinates for the internal slice
+            in the super chunk
+
+        Returns
+        -------
+        torch.Tensor
+            Low resolution data tensor
+        """
+        low_res_slices = tuple(
+            downscale_slice(
+                s=s,
+                factor=f,
+                levels=self.low_res_scale - self.high_res_scale
+            ) for s, f in zip(current_internal_slice_global[-3:], self.scale_factors)
+        )
+
+        downsampled_block, final_slices = extract_roi_chunked(
+            self.downsampled_lazy_data,
+            low_res_slices,
+            self.prediction_chunksize[-3:],
+        )
+        
+        return torch.from_numpy(downsampled_block), final_slices, low_res_slices
+    
+    def __getitem__(self, index: int) -> tuple:
+        """
+        Get item procedure for the Lazy zarr dataset.
+        It retrieves data based on the index variable
+        that is shared among all workers
+
+        Parameters
+        ----------
+        index: int
+            location index that goes from 0 to
+            ZarrSuperChunks().__len__(). This index
+            is internally mapped to correspond in
+            the generated slices per super chunk
+
+        Returns
+        -------
+        ZarrMultiScaleBatch
+            Batch with high and low resolution data
+        """
+        (
+            pulled_prediction_chunk,
+            curr_super_chunk_position,
+            current_internal_slices,
+            current_internal_slice_global
+        ) = super().__getitem__(index)
+        
+        padded_low_res_slices = None
+        unpadded_low_res_slices = None
+        low_res_data = None
+        global_coord_pos = None
+
+        if pulled_prediction_chunk is not None:
+            (
+                global_coord_pos,
+                global_coord_positions_start,
+                global_coord_positions_end,
+            ) = recover_global_position(
+                super_chunk_slice=curr_super_chunk_position[-3:],
+                internal_slices=[current_internal_slices[-3:]],
+            )
+            (
+                low_res_data,
+                padded_low_res_slices,
+                unpadded_low_res_slices,
+            ) = self.__get_low_res_data(
+                global_coord_pos[-3:]
+            )
+
+        return (
+            pulled_prediction_chunk,
+            low_res_data,
+            curr_super_chunk_position,
+            current_internal_slices,
+            global_coord_pos,
+            padded_low_res_slices,
+            unpadded_low_res_slices,
+            self.exaltation_wavelength,
+            self.high_scale_resolution,
+            self.low_scale_resolution,
+        )
 
 def helper_measure_dataloader_times(dataset: ZarrSuperChunks):
     """
@@ -965,6 +1392,7 @@ def create_data_loader(
     device: int,
     pin_memory: bool,
     dtype: type = np.float32,
+    mask_dimension: Optional[int] = None,
     super_chunksize: Optional[Tuple[int, ...]] = None,
     lazy_callback_fn: Optional[Callable[[ArrayLike], ArrayLike]] = None,
     override_suggested_cpus: Optional[bool] = True,
@@ -1065,7 +1493,7 @@ def create_data_loader(
         _print(f"Shape after call back function: {lazy_data.shape}")
 
     multiprocessing_context = None
-    if device is not None:
+    if device is not None and n_workers:
         device = torch.device(device)
         multiprocessing_context = "spawn"
         _print(
@@ -1082,6 +1510,7 @@ def create_data_loader(
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
+        masked_data_dimension=mask_dimension,
         prediction_chunksize=prediction_chunksize,
         overlap_prediction_chunksize=overlap_prediction_chunksize,
         super_chunksize=super_chunksize,
