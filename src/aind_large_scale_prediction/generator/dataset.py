@@ -1190,20 +1190,20 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
     def __init__(
         self,
         dataset_path: str,
-        high_res_scale: str,
-        low_res_scale: str,
+        hr_scale: str,
+        lr_scale: str,
         scale_factors: Tuple[int, int, int],
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.dataset_path = dataset_path
-        self.high_res_scale = int(high_res_scale)
-        self.low_res_scale = int(low_res_scale)
+        self.hr_scale = int(hr_scale)
+        self.lr_scale = int(lr_scale)
         self.scale_factors = scale_factors
         self.downsampled_lazy_data = da.squeeze(
             da.from_zarr(
-                f"{dataset_path}/{low_res_scale}",
+                f"{dataset_path}/{lr_scale}",
             )
         )
 
@@ -1214,8 +1214,8 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
 
         # Reading zattrs
         zattrs = read_top_level_zattrs(dataset_path, anon=True)
-        self.high_scale_resolution = get_resolution(zattrs, high_res_scale)
-        self.low_scale_resolution = get_resolution(zattrs, low_res_scale)
+        self.high_scale_resolution = get_resolution(zattrs, hr_scale)
+        self.low_scale_resolution = get_resolution(zattrs, lr_scale)
 
     def __get_low_res_data(
         self,
@@ -1240,7 +1240,7 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
             downscale_slice(
                 s=s,
                 factor=f,
-                levels=self.low_res_scale - self.high_res_scale
+                levels=self.lr_scale - self.hr_scale
             ) for s, f in zip(current_internal_slice_global[-3:], self.scale_factors)
         )
 
