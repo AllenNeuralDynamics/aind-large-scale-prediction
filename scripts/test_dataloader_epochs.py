@@ -12,6 +12,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
+from torch.utils.data import DataLoader
 
 from aind_large_scale_prediction.generator.dataset import create_data_loader
 from aind_large_scale_prediction.generator.utils import (
@@ -84,6 +85,7 @@ def main():
     target_size_mb = 1024
     n_workers = 0
     batch_size = 1
+    epochs = 4
     prediction_chunksize = (128, 128, 128)
     overlap_prediction_chunksize = (0, 0, 0)
     super_chunksize = (512, 512, 512)
@@ -153,47 +155,54 @@ def main():
     logger.info(f"Super chunk slices: {zarr_dataset.super_chunk_slices}")
 
     start_time = time.time()
+    samples_per_epoch = []
+    for epoch in range(epochs):
+        zarr_data_loader.dataset.init_index()
 
-    for i, sample in enumerate(zarr_data_loader):
+        for i, sample in enumerate(zarr_data_loader):
 
-        shape = [batch_size]
-        for ix in range(0, len(prediction_chunksize)):
-            shape.append(
-                sample.batch_internal_slice[0][ix].stop
-                - sample.batch_internal_slice[0][ix].start
+            shape = [batch_size]
+            for ix in range(0, len(prediction_chunksize)):
+                shape.append(
+                    sample.batch_internal_slice[0][ix].stop
+                    - sample.batch_internal_slice[0][ix].start
+                )
+
+            if sum(shape) != sum(sample.batch_tensor.shape):
+                raise ValueError(
+                    f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
+                )
+
+            (
+                global_coord_pos,
+                global_coord_positions_start,
+                global_coord_positions_end,
+            ) = recover_global_position(
+                super_chunk_slice=sample.batch_super_chunk[0],
+                internal_slices=sample.batch_internal_slice,
+            )
+            logger.info(
+                f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global intern slice: {sample.batch_internal_slice_global}- global pos: {global_coord_pos}"
             )
 
-        if sum(shape) != sum(sample.batch_tensor.shape):
-            raise ValueError(
-                f"Loaded tensor shape {sample.batch_tensor.shape} is not in the same location as slice shape: {shape} - slice: {sample.batch_internal_slice}"
+            data_block = sample.batch_tensor[0, ...].numpy()
+            unpadded_global_slice, unpadded_local_slice = unpad_global_coords(
+                global_coord_pos=global_coord_pos,
+                block_shape=data_block.shape,
+                overlap_prediction_chunksize=overlap_prediction_chunksize,
+                dataset_shape=zarr_dataset.lazy_data.shape,
             )
 
-        (
-            global_coord_pos,
-            global_coord_positions_start,
-            global_coord_positions_end,
-        ) = recover_global_position(
-            super_chunk_slice=sample.batch_super_chunk[0],
-            internal_slices=sample.batch_internal_slice,
-        )
-        logger.info(
-            f"Batch {i}: {sample.batch_tensor.shape} Super chunk: {sample.batch_super_chunk} - intern slice: {sample.batch_internal_slice} - global intern slice: {sample.batch_internal_slice_global}- global pos: {global_coord_pos}"
-        )
+            non_overlap_area = data_block[unpadded_local_slice]
 
-        data_block = sample.batch_tensor[0, ...].numpy()
-        unpadded_global_slice, unpadded_local_slice = unpad_global_coords(
-            global_coord_pos=global_coord_pos,
-            block_shape=data_block.shape,
-            overlap_prediction_chunksize=overlap_prediction_chunksize,
-            dataset_shape=zarr_dataset.lazy_data.shape,
-        )
+            logger.info(
+                f"Block shape: {data_block.shape} - nonoverlap area: {non_overlap_area.shape}"
+            )
 
-        non_overlap_area = data_block[unpadded_local_slice]
+        samples_per_epoch.append(i)
+        print("Final I: ", i)
 
-        logger.info(
-            f"Block shape: {data_block.shape} - nonoverlap area: {non_overlap_area.shape}"
-        )
-
+    print("Samples per epoch ", samples_per_epoch)
     end_time = time.time()
 
     logger.info(f"Time going through data loader: {end_time - start_time}")

@@ -360,7 +360,7 @@ class ZarrSuperChunks(Dataset):
         self.locker = locker
         self.condition = condition
         
-        self.__init_index()
+        self.init_index()
 
         # Initialization of super chunks
         (
@@ -389,7 +389,7 @@ class ZarrSuperChunks(Dataset):
             "i", len(self.internal_slice_sum)
         )
 
-    def __init_index(self):
+    def init_index(self):
         """
         Init index
         """
