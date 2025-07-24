@@ -541,9 +541,11 @@ def unpad_global_coords(
 
     return tuple(unpadded_glob_coord_pos), tuple(unpadded_local_coord_pos)
 
-
 def concatenate_lazy_data(
-    dataset_paths: List[PathLike], multiscales: List[str], concat_axis: int
+    dataset_paths: List[PathLike],
+    multiscales: List[str],
+    concat_axis: int,
+    **kwargs
 ) -> ArrayLike:
     """
     Concatenates lazy datasets in a given axis.
@@ -572,6 +574,7 @@ def concatenate_lazy_data(
             data_path=dataset_paths[idx],
             parse_path=False,
             multiscale=multiscales[idx],
+            **kwargs
         )
         .as_dask_array()
         for idx in range(len(dataset_paths))

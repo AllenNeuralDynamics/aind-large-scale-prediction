@@ -7,7 +7,8 @@ import os
 from typing import Optional
 
 from aind_large_scale_prediction._shared.types import ArrayLike
-
+import tensorstore as ts
+import urllib.parse
 
 def add_leading_dim(data: ArrayLike):
     """
@@ -104,3 +105,56 @@ def read_json_as_dict(filepath: str) -> dict:
             dictionary = json.load(json_file)
 
     return dictionary
+
+async def read_zarr_tensorstore(
+    dataset_path: str, scale: str, driver: Optional[str] = "zarr"
+):
+    """
+    Reads a zarr dataset from local filesystem or S3 bucket
+    Parameters
+    ----------
+    dataset_path: str
+        Path where the dataset is stored. Can be a local path or an S3 path (s3://...)
+    scale: str
+        Multiscale to load
+    driver: Optional[str]
+        Tensorstore driver
+        Default: zarr
+    Returns
+    -------
+    Tuple[ArrayLike, da.Array]
+        ArrayLike or None if compute is false
+        Lazy dask array
+    """
+    # Parse the URL properly using urllib
+    parsed_url = urllib.parse.urlparse(dataset_path)
+
+    if parsed_url.scheme == "s3":
+        # Handle S3 path
+        bucket = parsed_url.netloc
+        # Remove leading slash if present
+        key = parsed_url.path.lstrip("/")
+
+        ts_spec = {
+            "driver": str(driver),
+            "kvstore": {
+                "driver": "s3",
+                "bucket": bucket,
+                "path": key,
+            },
+            "path": str(scale),
+        }
+    else:
+        # Original local file handling
+        ts_spec = {
+            "driver": str(driver),
+            "kvstore": {
+                "driver": "file",
+                "path": str(dataset_path),
+            },
+            "path": str(scale),
+        }
+
+    tile_lazy = await ts.open(ts_spec)
+
+    return tile_lazy

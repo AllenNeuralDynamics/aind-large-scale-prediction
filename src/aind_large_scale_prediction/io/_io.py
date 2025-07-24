@@ -18,11 +18,43 @@ from dask.array.core import Array
 from dask.base import tokenize
 from dask_image.imread import imread as daimread
 from skimage.io import imread as sk_imread
+import asyncio
 
 from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 
-from .utils import add_leading_dim, read_json_as_dict
+from .utils import add_leading_dim, read_json_as_dict, read_zarr_tensorstore
 
+class TensorStoreWrapper:
+    """Wrapper to ensure numpy-compatible dtype"""
+    def __init__(self, ts_array):
+        self.ts_array = ts_array
+        self._shape = tuple(ts_array.shape)
+        
+        # Convert TensorStore dtype to proper numpy dtype
+        ts_dtype = ts_array.dtype
+        if hasattr(ts_dtype, 'numpy_dtype'):
+            self._dtype = ts_dtype.numpy_dtype
+        elif str(ts_dtype) == 'uint16':
+            self._dtype = np.uint16
+        else:
+            # Try to parse the dtype string
+            self._dtype = np.dtype(str(ts_dtype).replace('dtype("', '').replace('")', ''))
+
+    @property
+    def shape(self):
+        return self._shape
+    
+    @property
+    def dtype(self):
+        return self._dtype
+    
+    @property
+    def ndim(self):
+        return len(self._shape)
+    
+    def __getitem__(self, key):
+        result = self.ts_array[key].read().result()
+        return np.asarray(result, dtype=self._dtype)
 
 class ImageReader(ABC):
     """
@@ -165,6 +197,7 @@ class OMEZarrReader(ImageReader):
         self,
         data_path: PathLike,
         multiscale: Optional[str] = "0",
+        zarr_version="2.0"
     ) -> None:
         """
         Class constructor of image OMEZarr reader.
@@ -180,15 +213,29 @@ class OMEZarrReader(ImageReader):
 
         """
 
-        # Adding multiscale to path
-        if isinstance(data_path, str):
-            data_path = f"{data_path}/{multiscale}"
+        super().__init__(data_path=data_path)
+        if zarr_version == "3.0":
+            ts_ds = asyncio.run(
+                read_zarr_tensorstore(
+                    dataset_path=self.data_path,
+                    scale=str(multiscale),
+                    driver="zarr3"
+                )
+            )
+            self.lazy_image = da.from_array(
+                TensorStoreWrapper(ts_ds),
+                chunks=ts_ds.chunk_layout.read_chunk.shape
+            )
 
         else:
-            data_path = data_path.joinpath(str(multiscale))
+            # Adding multiscale to path
+            if isinstance(data_path, str):
+                data_path = f"{data_path}/{multiscale}"
 
-        super().__init__(data_path=data_path)
-        self.lazy_image = da.from_zarr(self.data_path)
+            else:
+                data_path = data_path.joinpath(str(multiscale))
+
+            self.lazy_image = da.from_zarr(self.data_path)
 
     def indexing(self, xv: np.array, yv: np.array) -> ArrayLike:
         """
@@ -390,7 +437,7 @@ class TiffReader(ImageReader):
             Dictionary with image metadata
         """
         metadata = {}
-        with pims.open(data_path) as imgs:
+        with pims.open(self.data_path) as imgs:
             metadata["shape"] = (1,) + (len(imgs),) + imgs.frame_shape
             metadata["dtype"] = np.dtype(imgs.pixel_type)
 
@@ -542,7 +589,7 @@ class PngReader(ImageReader):
             Dictionary with image metadata
         """
         metadata = {}
-        with pims.open(data_path) as imgs:
+        with pims.open(self.data_path) as imgs:
             metadata["shape"] = (len(imgs),) + imgs.frame_shape
 
         return metadata
