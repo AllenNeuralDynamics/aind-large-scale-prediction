@@ -342,6 +342,7 @@ class ZarrSuperChunks(Dataset):
         #         )
         #     ).dtype
         # ).share_memory_()
+        print("Init shared array!")
 
         # Camilo Laiton's note:
         # This is faster and has been working reliably for me
@@ -385,6 +386,7 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator [ Generator ]: Generator of slices per dimension.
         """
 
+        print("Initializing super chunks")
         if self.target_size_mb is None and self.super_chunksize is None:
             raise ValueError(
                 "Please, provide a target size or super chunk size."
@@ -1079,6 +1081,10 @@ def create_data_loader(
 
     locker = multp.Lock() if n_workers else None
     condition = multp.Condition()
+    
+    _print(
+        f"Creating zarr super chunks"
+    )
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
@@ -1092,6 +1098,10 @@ def create_data_loader(
     )
 
     persistent_workers = True if n_workers else False
+
+    _print(
+        f"Creating zarr data loader"
+    )
 
     zarr_data_loader = ZarrDataLoader(
         zarr_dataset,

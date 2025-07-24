@@ -106,7 +106,7 @@ def read_json_as_dict(filepath: str) -> dict:
 
     return dictionary
 
-async def read_zarr_tensorstore(
+def read_zarr_tensorstore(
     dataset_path: str, scale: str, driver: Optional[str] = "zarr"
 ):
     """
@@ -155,6 +155,6 @@ async def read_zarr_tensorstore(
             "path": str(scale),
         }
 
-    tile_lazy = await ts.open(ts_spec)
+    tile_lazy = ts.open(ts_spec).result()
 
     return tile_lazy

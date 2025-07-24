@@ -18,7 +18,6 @@ from dask.array.core import Array
 from dask.base import tokenize
 from dask_image.imread import imread as daimread
 from skimage.io import imread as sk_imread
-import asyncio
 
 from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 
@@ -215,12 +214,10 @@ class OMEZarrReader(ImageReader):
 
         super().__init__(data_path=data_path)
         if zarr_version == "3.0":
-            ts_ds = asyncio.run(
-                read_zarr_tensorstore(
-                    dataset_path=self.data_path,
-                    scale=str(multiscale),
-                    driver="zarr3"
-                )
+            ts_ds = read_zarr_tensorstore(
+                dataset_path=self.data_path,
+                scale=str(multiscale),
+                driver="zarr3"
             )
             self.lazy_image = da.from_array(
                 TensorStoreWrapper(ts_ds),
@@ -235,7 +232,7 @@ class OMEZarrReader(ImageReader):
             else:
                 data_path = data_path.joinpath(str(multiscale))
 
-            self.lazy_image = da.from_zarr(self.data_path)
+            self.lazy_image = da.from_zarr(data_path)
 
     def indexing(self, xv: np.array, yv: np.array) -> ArrayLike:
         """
