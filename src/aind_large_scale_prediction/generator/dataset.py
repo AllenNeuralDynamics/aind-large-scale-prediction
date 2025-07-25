@@ -153,6 +153,8 @@ class ZarrMultiScaleBatch:
         exaltation_wavelength: int,
         high_scale_resolution: int,
         low_scale_resolution: int,
+        hr_scale: int,
+        lr_scale: int,
         device: Optional[torch.cuda.Device] = None,
     ):
         """
@@ -188,6 +190,8 @@ class ZarrMultiScaleBatch:
         self.exaltation_wavelength = exaltation_wavelength
         self.high_scale_resolution = high_scale_resolution
         self.low_scale_resolution = low_scale_resolution
+        self.hr_scale = hr_scale
+        self.lr_scale = lr_scale
 
         if device is not None:
             self.high_resolution = self.high_resolution.to(device, non_blocking=True)
@@ -1184,6 +1188,8 @@ def collate_fn_multiscale(
         exaltation_wavelength=dataloader_return[0][7],
         high_scale_resolution=dataloader_return[0][8],
         low_scale_resolution=dataloader_return[0][9],
+        hr_scale=dataloader_return[0][10],
+        lr_scale=dataloader_return[0][11],
     )
 
 class MultiScaleZarrDataset(ZarrSuperChunks):
@@ -1311,6 +1317,8 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
             self.exaltation_wavelength,
             self.high_scale_resolution,
             self.low_scale_resolution,
+            self.hr_scale,
+            self.lr_scale,
         )
 
 def helper_measure_dataloader_times(dataset: ZarrSuperChunks):
