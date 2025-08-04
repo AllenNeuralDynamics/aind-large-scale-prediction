@@ -147,7 +147,6 @@ def collate_fn(
     torch.Tensor
         Returns the batch in a tensor format
     """
-
     len_chunks = len(dataloader_return[0][2])
 
     # batch_tensor
@@ -342,7 +341,6 @@ class ZarrSuperChunks(Dataset):
         #         )
         #     ).dtype
         # ).share_memory_()
-
         # Camilo Laiton's note:
         # This is faster and has been working reliably for me
         shared_array_base = multp.Array(
@@ -384,7 +382,6 @@ class ZarrSuperChunks(Dataset):
 
             zarr_iterator [ Generator ]: Generator of slices per dimension.
         """
-
         if self.target_size_mb is None and self.super_chunksize is None:
             raise ValueError(
                 "Please, provide a target size or super chunk size."
@@ -412,7 +409,7 @@ class ZarrSuperChunks(Dataset):
         if self.target_size_mb and self.super_chunksize is None:
 
             print(
-                f"Estimating super chunksize. Provided super chunksize: {self.super_chunksize} - Target MB: {self.target_size_mb}"
+                f"Estimating super chunk size. Provided super chunk size: {self.super_chunksize} - Target MB: {self.target_size_mb}"
             )
             new_super_chunksize = zarr_iterator.get_block_shape(
                 arr=self.lazy_data,
@@ -426,7 +423,7 @@ class ZarrSuperChunks(Dataset):
             )
 
             print(
-                f"Estimated chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunksize}"
+                f"Estimated chunk size to fit in memory {self.target_size_mb} MiB: {new_super_chunksize}"
             )
 
         # Generating super chunk slices
@@ -449,26 +446,13 @@ class ZarrSuperChunks(Dataset):
             new_super_chunksize = tuple(
                 np.array(new_super_chunksize) + np_overlap
             )
-
-            local_internal_slices = []
-            global_internal_slices = []
-
-            for sc in super_chunk_slices:
-                local_slices, global_slices = (
-                    zarr_iterator.gen_over_slices_on_over_superchunks(
-                        arr_shape=self.lazy_data[sc].shape,
-                        block_shape=self.prediction_chunksize,
-                        overlap_shape=self.overlap_prediction_chunksize,
-                        super_chunk_slices=sc,
-                        dataset_shape=self.lazy_data.shape,
-                    )
-                )
-                local_internal_slices.append(tuple(local_slices))
-                global_internal_slices.append(tuple(global_slices))
-
-            global_internal_slices = tuple(global_internal_slices)
-            local_internal_slices = tuple(local_internal_slices)
-
+            interal_slice_generator = zarr_iterator.gen_internal_slices(
+                self.lazy_data,
+                block_shape=self.prediction_chunksize,
+                overlap_shape=self.overlap_prediction_chunksize,
+                super_chunk_slices=super_chunk_slices,
+            )
+            local_internal_slices, global_internal_slices = zip(*interal_slice_generator)
         else:
             local_internal_slices = tuple(
                 tuple(
@@ -478,7 +462,7 @@ class ZarrSuperChunks(Dataset):
                     )
                 )
                 for super_chunk_slice in super_chunk_slices
-            )
+            )        
 
         return (
             new_super_chunksize,
@@ -664,7 +648,6 @@ class ZarrSuperChunks(Dataset):
             Tensor with the current chunk of the
             super chunk
         """
-
         # Checks if all chunks were returned for current super chunk
         self.locker.acquire()
         try:
@@ -1093,6 +1076,7 @@ def create_data_loader(
 
     persistent_workers = True if n_workers else False
 
+    print("n_workers:", n_workers)
     zarr_data_loader = ZarrDataLoader(
         zarr_dataset,
         batch_size=batch_size,
