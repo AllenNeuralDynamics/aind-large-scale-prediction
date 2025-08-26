@@ -4,15 +4,19 @@ to load the models
 """
 
 import logging
+import math
+import re
 import time
 from functools import partial
 from typing import Callable, List, Optional, Tuple
 
 import dask.array as da
+import fsspec
 import numpy as np
 import torch
 import torch.multiprocessing as multp
 import torch.nn.functional as F
+import zarr
 from torch.utils.data import Dataset, get_worker_info
 
 from aind_large_scale_prediction._shared.types import ArrayLike
@@ -21,20 +25,15 @@ from aind_large_scale_prediction.generator.utils import (
     find_position_in_total_sum,
     get_suggested_cpu_count,
     map_dtype_to_ctype,
+    recover_global_position,
+    unpad_global_coords,
 )
 from aind_large_scale_prediction.generator.zarr_slice_generator import (
     BlockedZarrArrayIterator,
     _closer_to_target_chunksize,
 )
 from aind_large_scale_prediction.io.utils import extract_data
-from aind_large_scale_prediction.generator.utils import (
-    recover_global_position,
-    unpad_global_coords,
-)
-import fsspec
-import re
-import zarr
-import math
+
 
 def reshape_dataset_to_prediction_chunks(
     lazy_data: ArrayLike, prediction_chunksize: Tuple[int, ...]
@@ -97,7 +96,7 @@ class ZarrCustomBatch:
         batch_super_chunk: List[Tuple[int]],
         batch_internal_slice: List[Tuple[int]],
         batch_internal_slice_global: List[Tuple[int]],
-        device: Optional[torch.cuda.Device] = None,
+        device: Optional[torch.device] = None,
     ):
         """
         Init method
@@ -115,7 +114,7 @@ class ZarrCustomBatch:
             Slices for the internal slices within
             the pulled super chunk
 
-        device: Optional[torch.cuda.Device]
+        device: Optional[torch.device]
             Device where the data will be placed.
             Default: None
 
@@ -155,7 +154,7 @@ class ZarrMultiScaleBatch:
         low_scale_resolution: int,
         hr_scale: int,
         lr_scale: int,
-        device: Optional[torch.cuda.Device] = None,
+        device: Optional[torch.device] = None,
     ):
         """
         Init method
@@ -173,7 +172,7 @@ class ZarrMultiScaleBatch:
             Slices for the internal slices within
             the pulled super chunk
 
-        device: Optional[torch.cuda.Device]
+        device: Optional[torch.device]
             Device where the data will be placed.
             Default: None
 
@@ -183,7 +182,9 @@ class ZarrMultiScaleBatch:
 
         self.high_res_super_chunk = tuple(batch_high_res_super_chunk)
         self.high_res_internal_slice = tuple(batch_high_res_internal_slice)
-        self.high_res_global_posiiton = tuple(batch_high_res_internal_slice_global)
+        self.high_res_global_posiiton = tuple(
+            batch_high_res_internal_slice_global
+        )
         self.low_res_padded_position = tuple(batch_low_res_padded_position)
         self.low_res_unpadded_position = tuple(batch_low_res_unpadded_position)
 
@@ -194,8 +195,12 @@ class ZarrMultiScaleBatch:
         self.lr_scale = lr_scale
 
         if device is not None:
-            self.high_resolution = self.high_resolution.to(device, non_blocking=True)
-            self.low_resolution = self.low_resolution.to(device, non_blocking=True)
+            self.high_resolution = self.high_resolution.to(
+                device, non_blocking=True
+            )
+            self.low_resolution = self.low_resolution.to(
+                device, non_blocking=True
+            )
 
     def pin_memory(self):
         """
@@ -206,9 +211,10 @@ class ZarrMultiScaleBatch:
 
         return self
 
+
 def collate_fn(
     dataloader_return: Tuple,
-    device: Optional[torch.cuda.Device] = None,
+    device: Optional[torch.device] = None,
 ):
     """
     Collate function to deal with pulled chunks
@@ -235,7 +241,7 @@ def collate_fn(
 
     for item in dataloader_return:
         batch_item = item[0]
-        
+
         if batch_item is None:
             continue
 
@@ -363,7 +369,7 @@ class ZarrSuperChunks(Dataset):
         # Multiprocessing variables
         self.locker = locker
         self.condition = condition
-        
+
         self.init_index()
 
         # Initialization of super chunks
@@ -949,8 +955,10 @@ class ZarrSuperChunks(Dataset):
             nonzero_elements = np.count_nonzero(
                 pulled_prediction_chunk[self.masked_data_dimension]
             )
-            total_elements_per_image = np.prod(pulled_prediction_chunk.shape[-3:])
-            percentage_nonzero = (nonzero_elements / total_elements_per_image)
+            total_elements_per_image = np.prod(
+                pulled_prediction_chunk.shape[-3:]
+            )
+            percentage_nonzero = nonzero_elements / total_elements_per_image
             keep_image = percentage_nonzero >= 0.3
 
             if not keep_image:
@@ -988,26 +996,30 @@ class ZarrSuperChunks(Dataset):
         self.super_chunk_in_memory = None
         self.array_pointer = None
 
+
 def downscale_slice(s: slice, factor: int, levels: int) -> slice:
     if s.start is None or s.stop is None:
-        raise ValueError("Downscaling requires explicit start and stop in slices.")
-    
+        raise ValueError(
+            "Downscaling requires explicit start and stop in slices."
+        )
+
     if factor <= 0:
         raise ValueError("Factor must be positive.")
-    
+
     if levels < 0:
         raise ValueError("Levels must be non-negative.")
-    
-    scale = factor ** levels
-    
+
+    scale = factor**levels
+
     start = math.floor(s.start / scale)
     stop = math.ceil(s.stop / scale)
-    
+
     # Ensure we don't get empty slices
     if start >= stop:
         stop = start + 1
-    
+
     return slice(start, stop)
+
 
 def extract_roi_chunked(downsampled_lazy, downsampled_slices, desired_shape):
     # print("down slices: ", downsampled_slices)
@@ -1029,7 +1041,7 @@ def extract_roi_chunked(downsampled_lazy, downsampled_slices, desired_shape):
     x0, x1 = xc - half_sx, xc + half_sx
 
     # print(f"New ranges ({z0}, {z1}) - ({y0}, {y1}) - ({x0}, {x1})")
-    
+
     # Getting shape of the whole volume, to make sure borders are padded
     shape_z, shape_y, shape_x = downsampled_lazy.shape[-3:]
 
@@ -1038,14 +1050,11 @@ def extract_roi_chunked(downsampled_lazy, downsampled_slices, desired_shape):
     x0_valid, x1_valid = max(0, x0), min(shape_x, x1)
 
     # print(f"Valid New ranges ({z0_valid}, {z1_valid}) - ({y0_valid}, {y1_valid}) - ({x0_valid}, {x1_valid})")
-    
+
     # Crop the valid portion
     cropped = np.squeeze(
         downsampled_lazy[
-            ...,
-            z0_valid:z1_valid,
-            y0_valid:y1_valid,
-            x0_valid:x1_valid
+            ..., z0_valid:z1_valid, y0_valid:y1_valid, x0_valid:x1_valid
         ].compute()
     )
 
@@ -1055,13 +1064,13 @@ def extract_roi_chunked(downsampled_lazy, downsampled_slices, desired_shape):
     pad_x = (x0_valid - x0, x1 - x1_valid)
 
     # print(pad_z, pad_y, pad_x)
-    
+
     # Pad to match target size
     padded = np.pad(
         cropped,
         pad_width=(pad_z, pad_y, pad_x),
-        mode='constant',
-        constant_values=0
+        mode="constant",
+        constant_values=0,
     )
     final_slices = (
         slice(None),
@@ -1073,42 +1082,46 @@ def extract_roi_chunked(downsampled_lazy, downsampled_slices, desired_shape):
 
     return padded, final_slices
 
+
 def read_top_level_zattrs(zarr_path, anon=True):
     # Remove the pyramid level if present (e.g., /2)
-    if zarr_path.endswith('/'):
+    if zarr_path.endswith("/"):
         zarr_path = zarr_path[:-1]
-    parts = zarr_path.split('/')
+    parts = zarr_path.split("/")
     if parts[-1].isdigit():
-        top_level_path = '/'.join(parts[:-1])
+        top_level_path = "/".join(parts[:-1])
     else:
         top_level_path = zarr_path
 
     mapper = fsspec.get_mapper(top_level_path, anon=anon)
-    group = zarr.open_group(mapper, mode='r')
+    group = zarr.open_group(mapper, mode="r")
     zattrs = group.attrs.asdict()
     return zattrs
 
+
 def get_resolution(zattrs, level):
     level = str(level)
-    datasets = zattrs["multiscales"][0]['datasets']
+    datasets = zattrs["multiscales"][0]["datasets"]
     for dset in datasets:
-        if dset['path'] == level:
-            return dset['coordinateTransformations'][0]['scale'][-3:]
+        if dset["path"] == level:
+            return dset["coordinateTransformations"][0]["scale"][-3:]
 
     return None
 
+
 def extract_wavelengths(zarr_path):
-    match = re.search(r'Ex_(\d+)_Em_(\d+)\.zarr', zarr_path)
+    match = re.search(r"Ex_(\d+)_Em_(\d+)\.zarr", zarr_path)
     if match:
         ex_wl = int(match.group(1))
         em_wl = int(match.group(2))
         return ex_wl, em_wl
-    
+
     return None
+
 
 def collate_fn_multiscale(
     dataloader_return: Tuple,
-    device: Optional[torch.cuda.Device] = None,
+    device: Optional[torch.device] = None,
 ):
     """
     Collate function to deal with pulled chunks
@@ -1124,7 +1137,7 @@ def collate_fn_multiscale(
     torch.Tensor
         Returns the batch in a tensor format
     """
-    
+
     len_chunks = len(dataloader_return[0][2])
 
     # batch_tensor
@@ -1138,7 +1151,7 @@ def collate_fn_multiscale(
 
     for item in dataloader_return:
         batch_item = item[0]
-        
+
         if batch_item is None:
             continue
 
@@ -1192,6 +1205,7 @@ def collate_fn_multiscale(
         lr_scale=dataloader_return[0][11],
     )
 
+
 class MultiScaleZarrDataset(ZarrSuperChunks):
     def __init__(
         self,
@@ -1224,8 +1238,7 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
         self.low_scale_resolution = get_resolution(zattrs, lr_scale)
 
     def __get_low_res_data(
-        self,
-        current_internal_slice_global: Tuple[slice]
+        self, current_internal_slice_global: Tuple[slice]
     ) -> Tuple[torch.Tensor, Tuple[slice]]:
         """
         Retrieves the low resolution data based on the
@@ -1244,10 +1257,11 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
         """
         low_res_slices = tuple(
             downscale_slice(
-                s=s,
-                factor=f,
-                levels=self.lr_scale - self.hr_scale
-            ) for s, f in zip(current_internal_slice_global[-3:], self.scale_factors)
+                s=s, factor=f, levels=self.lr_scale - self.hr_scale
+            )
+            for s, f in zip(
+                current_internal_slice_global[-3:], self.scale_factors
+            )
         )
 
         downsampled_block, final_slices = extract_roi_chunked(
@@ -1255,9 +1269,13 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
             low_res_slices,
             self.prediction_chunksize[-3:],
         )
-        
-        return torch.from_numpy(downsampled_block), final_slices, low_res_slices
-    
+
+        return (
+            torch.from_numpy(downsampled_block),
+            final_slices,
+            low_res_slices,
+        )
+
     def __getitem__(self, index: int) -> tuple:
         """
         Get item procedure for the Lazy zarr dataset.
@@ -1281,9 +1299,9 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
             pulled_prediction_chunk,
             curr_super_chunk_position,
             current_internal_slices,
-            current_internal_slice_global
+            current_internal_slice_global,
         ) = super().__getitem__(index)
-        
+
         padded_low_res_slices = None
         unpadded_low_res_slices = None
         low_res_data = None
@@ -1302,9 +1320,7 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
                 low_res_data,
                 padded_low_res_slices,
                 unpadded_low_res_slices,
-            ) = self.__get_low_res_data(
-                global_coord_pos[-3:]
-            )
+            ) = self.__get_low_res_data(global_coord_pos[-3:])
 
         return (
             pulled_prediction_chunk,
@@ -1320,6 +1336,7 @@ class MultiScaleZarrDataset(ZarrSuperChunks):
             self.hr_scale,
             self.lr_scale,
         )
+
 
 def helper_measure_dataloader_times(dataset: ZarrSuperChunks):
     """
@@ -1528,10 +1545,8 @@ def create_data_loader(
 
     locker = multp.Lock() if n_workers else None
     condition = multp.Condition()
-    
-    _print(
-        f"Creating zarr super chunks"
-    )
+
+    _print(f"Creating zarr super chunks")
 
     zarr_dataset = ZarrSuperChunks(
         lazy_data=lazy_data,
@@ -1547,9 +1562,7 @@ def create_data_loader(
 
     persistent_workers = True if n_workers else False
 
-    _print(
-        f"Creating zarr data loader"
-    )
+    _print(f"Creating zarr data loader")
 
     zarr_data_loader = ZarrDataLoader(
         zarr_dataset,

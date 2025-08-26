@@ -23,37 +23,42 @@ from aind_large_scale_prediction._shared.types import ArrayLike, PathLike
 
 from .utils import add_leading_dim, read_json_as_dict, read_zarr_tensorstore
 
+
 class TensorStoreWrapper:
     """Wrapper to ensure numpy-compatible dtype"""
+
     def __init__(self, ts_array):
         self.ts_array = ts_array
         self._shape = tuple(ts_array.shape)
-        
+
         # Convert TensorStore dtype to proper numpy dtype
         ts_dtype = ts_array.dtype
-        if hasattr(ts_dtype, 'numpy_dtype'):
+        if hasattr(ts_dtype, "numpy_dtype"):
             self._dtype = ts_dtype.numpy_dtype
-        elif str(ts_dtype) == 'uint16':
+        elif str(ts_dtype) == "uint16":
             self._dtype = np.uint16
         else:
             # Try to parse the dtype string
-            self._dtype = np.dtype(str(ts_dtype).replace('dtype("', '').replace('")', ''))
+            self._dtype = np.dtype(
+                str(ts_dtype).replace('dtype("', "").replace('")', "")
+            )
 
     @property
     def shape(self):
         return self._shape
-    
+
     @property
     def dtype(self):
         return self._dtype
-    
+
     @property
     def ndim(self):
         return len(self._shape)
-    
+
     def __getitem__(self, key):
         result = self.ts_array[key].read().result()
         return np.asarray(result, dtype=self._dtype)
+
 
 class ImageReader(ABC):
     """
@@ -196,7 +201,7 @@ class OMEZarrReader(ImageReader):
         self,
         data_path: PathLike,
         multiscale: Optional[str] = "0",
-        zarr_version="2.0"
+        zarr_version="2.0",
     ) -> None:
         """
         Class constructor of image OMEZarr reader.
@@ -217,11 +222,11 @@ class OMEZarrReader(ImageReader):
             ts_ds = read_zarr_tensorstore(
                 dataset_path=self.data_path,
                 scale=str(multiscale),
-                driver="zarr3"
+                driver="zarr3",
             )
             self.lazy_image = da.from_array(
                 TensorStoreWrapper(ts_ds),
-                chunks=ts_ds.chunk_layout.read_chunk.shape
+                chunks=ts_ds.chunk_layout.read_chunk.shape,
             )
 
         else:

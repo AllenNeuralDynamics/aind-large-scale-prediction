@@ -4,11 +4,13 @@ Utility functions for image readers
 
 import json
 import os
+import urllib.parse
 from typing import Optional
 
-from aind_large_scale_prediction._shared.types import ArrayLike
 import tensorstore as ts
-import urllib.parse
+
+from aind_large_scale_prediction._shared.types import ArrayLike
+
 
 def add_leading_dim(data: ArrayLike):
     """
@@ -105,6 +107,7 @@ def read_json_as_dict(filepath: str) -> dict:
             dictionary = json.load(json_file)
 
     return dictionary
+
 
 def read_zarr_tensorstore(
     dataset_path: str, scale: str, driver: Optional[str] = "zarr"

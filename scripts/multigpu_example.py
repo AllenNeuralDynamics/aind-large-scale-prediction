@@ -11,6 +11,8 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torch.distributed as dist
 import zarr
 
 from aind_large_scale_prediction.generator.dataset import create_data_loader
@@ -21,8 +23,7 @@ from aind_large_scale_prediction.generator.utils import (
     recover_global_position,
     unpad_global_coords,
 )
-import torch.distributed as dist
-import torch
+
 
 def create_logger(output_log_path: str) -> logging.Logger:
     """
@@ -61,12 +62,14 @@ def create_logger(output_log_path: str) -> logging.Logger:
 
     return logger
 
+
 def setup_ddp():
     """Initialize DDP environment variables and set device."""
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     return local_rank
+
 
 def main():
     """
@@ -179,7 +182,7 @@ def main():
     for i, sample in enumerate(zarr_data_loader):
         if i % dist.get_world_size() != local_rank:
             continue
-        
+
         shape = [batch_size]
         for ix in range(0, len(prediction_chunksize)):
             shape.append(
