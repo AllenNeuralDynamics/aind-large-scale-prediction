@@ -427,6 +427,64 @@ class BlockedZarrArrayIterator:
 
         return local_super_chunk_slices, global_super_chunk_slices
 
+
+    def gen_internal_slices(
+        self,
+        lazy_data,
+        block_shape: Tuple[int, ...],
+        overlap_shape: Tuple[int, ...],
+        super_chunk_slices: Tuple[slice],
+    ):
+        for sc in super_chunk_slices:
+            local_slices, global_slices = (
+                self.gen_over_slices_on_over_superchunks(
+                    arr_shape=lazy_data[sc].shape,
+                    block_shape=block_shape,
+                    overlap_shape=overlap_shape,
+                    super_chunk_slices=sc,
+                    dataset_shape=lazy_data.shape,
+                )
+            )
+            yield tuple(local_slices), tuple(global_slices)
+
+    def gen_local_internal_slices(
+        self,
+        lazy_data,
+        block_shape: Tuple[int, ...],
+        overlap_shape: Tuple[int, ...],
+        super_chunk_slices: Tuple[slice],
+    ):
+        for sc in super_chunk_slices:
+            local_slices, _ = (
+                self.gen_over_slices_on_over_superchunks(
+                    arr_shape=lazy_data[sc].shape,
+                    block_shape=block_shape,
+                    overlap_shape=overlap_shape,
+                    super_chunk_slices=sc,
+                    dataset_shape=lazy_data.shape,
+                )
+            )
+            yield tuple(local_slices)
+
+    def gen_global_internal_slices(
+        self,
+        lazy_data,
+        block_shape: Tuple[int, ...],
+        overlap_shape: Tuple[int, ...],
+        super_chunk_slices: Tuple[slice],
+    ):
+        for sc in super_chunk_slices:
+            _, global_slices = (
+                self.gen_over_slices_on_over_superchunks(
+                    arr_shape=lazy_data[sc].shape,
+                    block_shape=block_shape,
+                    overlap_shape=overlap_shape,
+                    super_chunk_slices=sc,
+                    dataset_shape=lazy_data.shape,
+                )
+            )
+            yield tuple(global_slices)
+
     @staticmethod
     def get_block_shape(arr: ArrayLike, target_size_mb=409600, mode="cycle"):
         """

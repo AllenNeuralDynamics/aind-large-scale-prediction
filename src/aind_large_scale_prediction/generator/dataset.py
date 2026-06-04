@@ -147,7 +147,6 @@ def collate_fn(
     torch.Tensor
         Returns the batch in a tensor format
     """
-
     len_chunks = len(dataloader_return[0][2])
 
     # batch_tensor
@@ -342,7 +341,6 @@ class ZarrSuperChunks(Dataset):
         #         )
         #     ).dtype
         # ).share_memory_()
-
         # Camilo Laiton's note:
         # This is faster and has been working reliably for me
         shared_array_base = multp.Array(
@@ -384,7 +382,6 @@ class ZarrSuperChunks(Dataset):
 
             zarr_iterator [ Generator ]: Generator of slices per dimension.
         """
-
         if self.target_size_mb is None and self.super_chunksize is None:
             raise ValueError(
                 "Please, provide a target size or super chunk size."
@@ -412,7 +409,7 @@ class ZarrSuperChunks(Dataset):
         if self.target_size_mb and self.super_chunksize is None:
 
             print(
-                f"Estimating super chunksize. Provided super chunksize: {self.super_chunksize} - Target MB: {self.target_size_mb}"
+                f"Estimating super chunk size. Provided super chunk size: {self.super_chunksize} - Target MB: {self.target_size_mb}"
             )
             new_super_chunksize = zarr_iterator.get_block_shape(
                 arr=self.lazy_data,
@@ -426,7 +423,7 @@ class ZarrSuperChunks(Dataset):
             )
 
             print(
-                f"Estimated chunksize to fit in memory {self.target_size_mb} MiB: {new_super_chunksize}"
+                f"Estimated chunk size to fit in memory {self.target_size_mb} MiB: {new_super_chunksize}"
             )
 
         # Generating super chunk slices
@@ -434,41 +431,33 @@ class ZarrSuperChunks(Dataset):
             zarr_iterator.gen_slices(
                 arr_shape=self.lazy_data.shape,
                 block_shape=new_super_chunksize,
-                overlap_shape=self.overlap_prediction_chunksize,  # Super chunk slices with overlap between them
+                overlap_shape=self.overlap_prediction_chunksize,
             )
         )
 
+        # Generate internal slices
         local_internal_slices = None
         global_internal_slices = None
-
-        np_overlap = np.array(self.overlap_prediction_chunksize) * 2
-        if np.any(np_overlap):
+        if np.any(self.overlap_prediction_chunksize):
+            np_overlap = np.array(self.overlap_prediction_chunksize) * 2
             print(
                 f"Adding overlap area to super chunk size: {new_super_chunksize} - {tuple(np.array(new_super_chunksize) + np_overlap)}"
             )
             new_super_chunksize = tuple(
                 np.array(new_super_chunksize) + np_overlap
             )
-
-            local_internal_slices = []
-            global_internal_slices = []
-
-            for sc in super_chunk_slices:
-                local_slices, global_slices = (
-                    zarr_iterator.gen_over_slices_on_over_superchunks(
-                        arr_shape=self.lazy_data[sc].shape,
-                        block_shape=self.prediction_chunksize,
-                        overlap_shape=self.overlap_prediction_chunksize,
-                        super_chunk_slices=sc,
-                        dataset_shape=self.lazy_data.shape,
-                    )
-                )
-                local_internal_slices.append(tuple(local_slices))
-                global_internal_slices.append(tuple(global_slices))
-
-            global_internal_slices = tuple(global_internal_slices)
-            local_internal_slices = tuple(local_internal_slices)
-
+            local_internal_slices = zarr_iterator.gen_local_internal_slices(
+                self.lazy_data,
+                block_shape=self.prediction_chunksize,
+                overlap_shape=self.overlap_prediction_chunksize,
+                super_chunk_slices=super_chunk_slices,
+            )
+            global_internal_slices = zarr_iterator.gen_global_internal_slices(
+                self.lazy_data,
+                block_shape=self.prediction_chunksize,
+                overlap_shape=self.overlap_prediction_chunksize,
+                super_chunk_slices=super_chunk_slices,
+            )
         else:
             local_internal_slices = tuple(
                 tuple(
@@ -479,7 +468,6 @@ class ZarrSuperChunks(Dataset):
                 )
                 for super_chunk_slice in super_chunk_slices
             )
-
         return (
             new_super_chunksize,
             super_chunk_slices,
@@ -664,7 +652,6 @@ class ZarrSuperChunks(Dataset):
             Tensor with the current chunk of the
             super chunk
         """
-
         # Checks if all chunks were returned for current super chunk
         self.locker.acquire()
         try:
@@ -715,32 +702,32 @@ class ZarrSuperChunks(Dataset):
                     self.condition.wait()
 
         # Getting internal slice position
-        curr_internal_super_chunk_position = self.__map_index(index)
+        cur_internal_super_chunk_position = self.__map_index(index)
 
         if (
             self.internal_slice_sum[self.curr_super_chunk_pos.value]
-            < curr_internal_super_chunk_position
+            < cur_internal_super_chunk_position
         ):
             raise RuntimeError(
-                f"Worker got an out of bounds index: {curr_internal_super_chunk_position}"
+                f"Worker got an out of bounds index: {cur_internal_super_chunk_position}"
             )
 
         # Pulling chunk
-        current_internal_slice = self.internal_slices[
+        cur_internal_slice = self.internal_slices[
             self.curr_super_chunk_pos.value
-        ][curr_internal_super_chunk_position]
+        ][cur_internal_super_chunk_position]
 
-        current_internal_slice_global = None
+        cur_internal_slice_global = None
         if self.global_internal_slices is not None:
-            current_internal_slice_global = self.global_internal_slices[
+            cur_internal_slice_global = self.global_internal_slices[
                 self.curr_super_chunk_pos.value
-            ][curr_internal_super_chunk_position]
+            ][cur_internal_super_chunk_position]
 
         curr_super_chunk_position = self.super_chunk_slices[
             self.curr_super_chunk_pos.value
         ]
 
-        pulled_chunk = self.super_chunk_in_memory[current_internal_slice]
+        pulled_chunk = self.super_chunk_in_memory[cur_internal_slice]
 
         # Updating number of chunks pulled per super chunk
         with self.pulled_chunks_per_super_chunk.get_lock():
@@ -751,8 +738,8 @@ class ZarrSuperChunks(Dataset):
         return (
             pulled_chunk,
             curr_super_chunk_position,
-            current_internal_slice,
-            current_internal_slice_global,
+            cur_internal_slice,
+            cur_internal_slice_global,
         )
 
     def __getitem__(self, index: int) -> torch.Tensor:
@@ -775,10 +762,8 @@ class ZarrSuperChunks(Dataset):
             Tensor with size (batch_size, slice_size)
             where slice_size depends on your data
         """
+        cur_internal_slice = None
         pulled_prediction_chunk = None
-        current_internal_slice = None
-        curr_super_chunk_position = None
-
         worker_info = get_worker_info()
 
         if worker_info is None:
@@ -807,47 +792,47 @@ class ZarrSuperChunks(Dataset):
                 )
 
             # Mapping current index to internal batch index
-            curr_internal_super_chunk_position = self.__map_index(index)
+            cur_internal_super_chunk_position = self.__map_index(index)
 
             if (
                 self.internal_slice_sum[self.curr_super_chunk_pos.value]
-                < curr_internal_super_chunk_position
+                < cur_internal_super_chunk_position
             ):
                 raise RuntimeError(
-                    f"Worker got an out of bounds index: {curr_internal_super_chunk_position}"
+                    f"Worker got an out of bounds index: {cur_internal_super_chunk_position}"
                 )
 
             # Pulling chunk
-            curr_super_chunk_position = self.super_chunk_slices[
+            cur_super_chunk_position = self.super_chunk_slices[
                 self.curr_super_chunk_pos.value
             ]
-            current_internal_slice = self.internal_slices[
+            cur_internal_slice = self.internal_slices[
                 self.curr_super_chunk_pos.value
-            ][curr_internal_super_chunk_position]
+            ][cur_internal_super_chunk_position]
 
-            current_internal_slice_global = None
+            cur_internal_slice_global = None
             if self.global_internal_slices is not None:
-                current_internal_slice_global = self.global_internal_slices[
+                cur_internal_slice_global = self.global_internal_slices[
                     self.curr_super_chunk_pos.value
-                ][curr_internal_super_chunk_position]
+                ][cur_internal_super_chunk_position]
 
             pulled_prediction_chunk = self.super_chunk_in_memory[
-                current_internal_slice
+                cur_internal_slice
             ]
 
         else:
             (
                 pulled_prediction_chunk,
-                curr_super_chunk_position,
-                current_internal_slice,
-                current_internal_slice_global,
+                cur_super_chunk_position,
+                cur_internal_slice,
+                cur_internal_slice_global,
             ) = self.__parallel_get_item(index)
 
         return (
             pulled_prediction_chunk,
-            curr_super_chunk_position,
-            current_internal_slice,
-            current_internal_slice_global,
+            cur_super_chunk_position,
+            cur_internal_slice,
+            cur_internal_slice_global,
         )
 
     def __len__(self) -> int:
@@ -1093,6 +1078,7 @@ def create_data_loader(
 
     persistent_workers = True if n_workers else False
 
+    print("n_workers:", n_workers)
     zarr_data_loader = ZarrDataLoader(
         zarr_dataset,
         batch_size=batch_size,
